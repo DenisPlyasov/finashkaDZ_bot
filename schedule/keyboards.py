@@ -37,3 +37,4 @@ def results_kb_tokens(pairs: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     else:
         rows.append([InlineKeyboardButton(text="◀ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+#sfsf

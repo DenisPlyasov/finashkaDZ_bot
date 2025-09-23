@@ -257,3 +257,4 @@ async def _edit_or_send_long(message: Message, text: str):
             await message.answer(text[3500:])
     except Exception:
         await message.answer(text)
+        #sfs

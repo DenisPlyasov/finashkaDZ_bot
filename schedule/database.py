@@ -4,7 +4,7 @@ from config import DB_PATH
 
 def _conn():
     return sqlite3.connect(DB_PATH)
-
+#bxb
 def init_db():
     with _conn() as conn:
         c = conn.cursor()

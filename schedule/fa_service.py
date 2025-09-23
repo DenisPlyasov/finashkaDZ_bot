@@ -68,5 +68,5 @@ def format_timetable(items: List[Dict], with_dates: bool = True) -> str:
         if teacher:
             pieces.append(f"👨‍🏫 {teacher}")
         lines.append("  " + " | ".join(pieces))
-
+#fs
     return "\n".join(lines).lstrip()
