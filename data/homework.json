@@ -1,0 +1,57 @@
+{
+    "1": {
+        "id": "1",
+        "user_id": 5139145924,
+        "email": "250582@edu.fa.ru",
+        "group": "БИ25-3",
+        "subject": "русский язык",
+        "deadline": "27.09.25",
+        "task": "выучит суффиксы",
+        "attachment": "https://t.me/makanhuesos",
+        "created_at": "2025-09-26 16:07:28"
+    },
+    "2": {
+        "id": "2",
+        "user_id": 5139145924,
+        "email": "250582@edu.fa.ru",
+        "group": "БИ25-3",
+        "subject": "ОРГ",
+        "deadline": "30.10.25",
+        "task": "егэ по берну",
+        "attachment": "@munchen888",
+        "created_at": "2025-09-26 16:43:09"
+    },
+    "3": {
+        "id": "3",
+        "user_id": 5139145924,
+        "email": "250582@edu.fa.ru",
+        "group": "БИ25-3",
+        "subject": "Англ бизнес",
+        "deadline": "02.10.25",
+        "task": "Resume of business dodes from Adventure time",
+        "attachment": "-",
+        "created_at": "2025-09-26 16:45:51"
+    },
+    "4": {
+        "id": "4",
+        "user_id": 5139145924,
+        "email": "250582@edu.fa.ru",
+        "group": "БИ25-3",
+        "subject": "Гарант",
+        "deadline": "10.10.25",
+        "task": "сделать тесты 1-4",
+        "attachment": "https://garant.ru/",
+        "created_at": "2025-09-26 17:54:39"
+    },
+    "5": {
+        "id": "5",
+        "user_id": 5139145924,
+        "email": "250582@edu.fa.ru",
+        "group": "БИ25-3",
+        "subject": "Литература",
+        "deadline": "25.25.25",
+        "task": "Окак, не ждали литературу в вузе?",
+        "attachment": "-",
+        "created_at": "2025-09-26 17:59:00"
+    }
+}
