@@ -245,6 +245,13 @@ async def on_teacher_surname(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"Ошибка при поиске преподавателя: {e}")
         return ConversationHandler.END
 
+    #если нет препода
+    if len(teachers) == 0:
+        await update.message.reply_text(
+            "Мы не смогли найти такого преподавателя. Напишите фамилию ещё раз:"
+        )
+        return ASK_TEACHER
+
     # если один — берём сразу
     if len(teachers) == 1:
         t = teachers[0]
