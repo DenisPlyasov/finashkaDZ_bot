@@ -4,6 +4,10 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes
 )
 import homework
+from homework import homework_menu, homework_callback, message_handler
+from schedule import schedule_menu, schedule_callback
+from teachers_schedule import get_conv_handler,conv
+
 
 WELCOME_TEXT = (
     "Привет! 👋\n"
@@ -24,25 +28,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(WELCOME_TEXT, reply_markup=reply_markup)
 
 
-# async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     query = update.callback_query
-#     await query.answer()
-
-#     if query.data == "schedule":
-#         await query.edit_message_text("📅 Раздел с расписанием пока пуст.")
-#     elif query.data == "mail":
-#         await query.edit_message_text("📧 Раздел с почтой пока пуст.")
-#     elif query.data == "homework":
-#         await homework.homework_menu(update, context)
-#     elif query.data in ["hw_view", "hw_upload"]:
-#         await homework.homework_callback(update, context)
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     if query.data == "schedule":
-        await query.edit_message_text("📅 Раздел с расписанием пока пуст.")
+        await schedule_menu(update, context)
     elif query.data == "mail":
         await query.edit_message_text("📧 Раздел с почтой пока пуст.")
     elif query.data == "homework":
@@ -58,8 +49,13 @@ def main():
     app = ApplicationBuilder().token(token_value).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(get_conv_handler())
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, homework.message_handler))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(schedule|select_group)$"))
+    app.add_handler(CallbackQueryHandler(homework_callback, pattern="^hw_"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.add_handler(conv)
 
     print("✅ Бот запущен...")
     app.run_polling()
