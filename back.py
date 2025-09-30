@@ -69,7 +69,7 @@ async def on_error(update: object, context):
     except Exception:
         pass
 
-token_value = "8386694816:AAF-cqnzapG3xvWX2ZNIcSTbBkyms1FcQTY"
+token_value = ""
 
 def main():
     # Отключаем возможные системные прокси, чтобы httpx не лез в них
