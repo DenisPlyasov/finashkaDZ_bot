@@ -1,15 +1,15 @@
 import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict
+import re
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, ConversationHandler, filters, Defaults
+    CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, ConversationHandler, filters
 )
-import re
-from fa_api import FaAPI  # <-- твоя библиотека
+from fa_api import FaAPI
 
 # ====== Константы состояний диалога ======
 ASK_TEACHER, CHOOSE_TEACHER, CHOOSE_RANGE, ASK_CUSTOM_DATE = range(4)
@@ -29,6 +29,30 @@ def _fmt_day(records: list[dict], teacher_fallback: str = "Преподават�
     if not records:
         return "Занятий не найдено."
 
+    async def start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Точка входа при нажатии кнопки 'Преподаватель' из меню расписания."""
+        q = update.callback_query
+        if q:
+            await q.answer()
+        return await cmd_start(update, context)
+
+    def build_teachers_schedule_conv() -> ConversationHandler:
+        """Возвращает ConversationHandler для сценария расписания преподавателя."""
+        return ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(start_from_menu, pattern=r"^teachers_schedule$"),
+                CommandHandler("teacher_schedule", cmd_start),
+            ],
+            states={
+                ASK_TEACHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_teacher_surname)],
+                CHOOSE_TEACHER: [CallbackQueryHandler(on_pick_teacher, pattern=r"^pick_teacher:")],
+                CHOOSE_RANGE: [CallbackQueryHandler(on_pick_range, pattern=r"^range:")],
+                ASK_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_custom_date)],
+            },
+            fallbacks=[CommandHandler("teacher_schedule", cmd_start)],
+            name="timetable_conv",
+            persistent=False,
+        )
 
     def _val(x):  # None -> ""
         return (x or "").strip()
@@ -426,8 +450,6 @@ async def _fetch_and_format(teacher_id, start: datetime, end: datetime, teacher_
 
 # ====== Сборка приложения ======
 def main():
-    TOKEN = "8204528132:AAE3Fw9H0WJKhxGz5sP_UBiOQr-jyrrlcjo"
-    app = ApplicationBuilder().token(TOKEN).defaults(Defaults(parse_mode=ParseMode.HTML)).build()
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
@@ -442,8 +464,6 @@ def main():
         persistent=False
     )
 
-    app.add_handler(conv)
-    app.run_polling()
 
 if __name__ == "__main__":
     main()

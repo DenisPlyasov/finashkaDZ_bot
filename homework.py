@@ -1,8 +1,10 @@
-# homework.py (обновлённый вариант без редактирования/удаления и с ограничением на файлы)
+# homework.py (с верификацией email через код)
 import os
 import json
+import random
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime
-from pathlib import Path
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -13,12 +15,20 @@ from telegram.ext import ContextTypes
 DATA_DIR = "data"
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 HOMEWORK_FILE = os.path.join(DATA_DIR, "homework.json")
+VALID_EMAILS_FILE = os.path.join(DATA_DIR, "valid_emails.json")
+BLACK_LIST = os.path.join(DATA_DIR, "black_list.json")
 
 # Google Sheets
 SCOPE = ["https://spreadsheets.google.com/feeds",
          "https://www.googleapis.com/auth/drive"]
 GSHEET_NAME = "homework"                       
 GSHEET_CREDS = "finashkadzbot-d8415e20cc18.json"  
+
+# SMTP (настрой под себя!)
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SMTP_USER = "finashkadzbot@gmail.com"       # заменишь на свой email
+SMTP_PASSWORD = open('password_mail.txt').readline()      # app password для SMTP
 
 # Главное меню
 START_TEXT = (
@@ -38,7 +48,7 @@ START_KEYBOARD = InlineKeyboardMarkup(
 # -------------------- Утилиты --------------------
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
-    for p in [USERS_FILE, HOMEWORK_FILE]:
+    for p in [USERS_FILE, HOMEWORK_FILE, VALID_EMAILS_FILE]:
         if not os.path.exists(p):
             with open(p, "w", encoding="utf-8") as f:
                 json.dump({}, f, ensure_ascii=False, indent=4)
@@ -72,6 +82,18 @@ def get_homework_from_sheet(group: str):
         raise Exception(f"В Google Таблице нет вкладки для группы {group}")
     except Exception as e:
         raise Exception(f"Ошибка при чтении Google Sheets: {e}")
+
+# -------------------- Email --------------------
+def send_email_code(email: str, code: str):
+    msg = MIMEText(f"Ваш код подтверждения: {code}")
+    msg["Subject"] = "Код подтверждения для бота"
+    msg["From"] = SMTP_USER
+    msg["To"] = email
+
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.send_message(msg)
 
 # -------------------- Главное меню --------------------
 async def homework_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,10 +153,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "hw_action" not in context.user_data:
         return
-
     action = context.user_data["hw_action"]
 
-    # ---- Просмотр домашки ----
+    # ---- Просмотр ----
     if action == "view_group":
         group = text
         try:
@@ -169,22 +190,66 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
-    # ---- Загрузка домашки ----
+    # ---- Верификация email ----
     if action == "upload_email":
-        context.user_data["email"] = text
-        context.user_data["telegram_id"] = uid
-        context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        users = load_json(USERS_FILE)
-        users[str(uid)] = {"email": text, "group": None, "telegram_id": uid, "created_at": context.user_data["created_at"]}
-        save_json(USERS_FILE, users)
-        await msg.reply_text("Введите номер группы (например, БИ25-1):")
-        context.user_data["hw_action"] = "upload_group"
+        email = text
+        if not email.endswith("@edu.fa.ru"):
+            await msg.reply_text("❌ Разрешены только адреса на @edu.fa.ru")
+            return
+
+        valid_emails = load_json(VALID_EMAILS_FILE)
+        black_list = load_json(BLACK_LIST)
+        if email in valid_emails and email not in black_list:
+            # уже подтвержден
+            context.user_data["email"] = email
+            context.user_data["telegram_id"] = uid
+            context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await msg.reply_text("Введите номер группы (например, БИ25-1):")
+            context.user_data["hw_action"] = "upload_group"
+        elif email not in valid_emails and email not in black_list:
+            code = str(random.randint(100000, 999999))
+            context.user_data["pending_email"] = email
+            context.user_data["pending_code"] = code
+            try:
+                send_email_code(email, code)
+                await msg.reply_text("Введите код, отправленный на вашу почту. Это потребуется сделать один раз ради безопасности всех пользователей.")
+                context.user_data["hw_action"] = "verify_code"
+            except Exception as e:
+                await msg.reply_text(f"⚠️ Не удалось отправить письмо: {e}")
+        elif email in black_list:
+            await update.message.reply_animation(
+                animation="https://i.pinimg.com/originals/5c/81/de/5c81de8be60ed702e94a5fffc682db51.gif",
+                caption="Вы были забанены за нарушение правил сообщества!"
+            )
         return
 
+    if action == "verify_code":
+        if text == context.user_data.get("pending_code"):
+            email = context.user_data["pending_email"]
+            valid_emails = load_json(VALID_EMAILS_FILE)
+            valid_emails[email] = True
+            save_json(VALID_EMAILS_FILE, valid_emails)
+
+            context.user_data["email"] = email
+            context.user_data["telegram_id"] = uid
+            context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            await msg.reply_text("✅ Почта подтверждена!\nВведите номер группы (например, БИ25-1):")
+            context.user_data["hw_action"] = "upload_group"
+        else:
+            await msg.reply_text("❌ Неверный код. Попробуйте снова.")
+        return
+
+    # ---- Добавление ДЗ ----
     if action == "upload_group":
         context.user_data["group"] = text
         users = load_json(USERS_FILE)
-        users[str(uid)]["group"] = text
+        users[str(uid)] = {
+            "email": context.user_data["email"],
+            "group": text,
+            "telegram_id": uid,
+            "created_at": context.user_data["created_at"]
+        }
         save_json(USERS_FILE, users)
         await msg.reply_text("📘 По какому предмету домашка?")
         context.user_data["hw_action"] = "upload_subject"
@@ -204,8 +269,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "upload_task":
         context.user_data["task"] = text
-        await msg.reply_text("📎 Введите название файла или ссылку на задание. "
-                             "Работа с файлами и фото временно недоступна.")
+        await msg.reply_text("📎 Введите название файла или ссылку на задание (или 'нет'):")
         context.user_data["hw_action"] = "upload_attachment"
         return
 
@@ -229,13 +293,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hw_data[new_id] = entry
         save_json(HOMEWORK_FILE, hw_data)
 
-        # добавление в Google Sheets
         try:
             append_homework_to_sheet(
                 entry["group"], entry["subject"], entry["deadline"],
                 entry["task"], entry["attachment"]
             )
-            # создаём клавиатуру с двумя кнопками
             kb = InlineKeyboardMarkup([[
                 InlineKeyboardButton("Добавить ДЗ", callback_data="hw_add"),
                 InlineKeyboardButton("В меню", callback_data="hw_to_menu")
@@ -245,9 +307,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb
             )
         except Exception as e:
-            await msg.reply_text(
-                f"⚠️ Локально сохранено, но не удалось записать в Google Sheets: {e}"
-            )
+            await msg.reply_text(f"⚠️ Локально сохранено, но не удалось записать в Google Sheets: {e}")
 
-    context.user_data.clear()
-    return
+        context.user_data.clear()
+        return
