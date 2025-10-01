@@ -10,7 +10,7 @@ from telegram.ext import (
 
 from schedule import schedule_menu, schedule_callback
 import teachers_schedule as TS  # модуль с логикой преподавателей
-from homework import homework_menu, homework_callback, message_handler
+
 # ===== ЛОГГЕРЫ =====
 logging.basicConfig(
     level=logging.WARNING,
@@ -41,10 +41,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == "mail":
         await q.edit_message_text("📧 Раздел с почтой пока пуст.")
     elif q.data == "homework":
-        await homework_menu(update, context)
-    elif q.data.startswith("hw_"):
-        # все команды hw_* обрабатывает homework.homework_callback
-        await homework_callback(update, context)
+        await q.edit_message_text("📚 Раздел с домашкой пока пуст.")
 
 # вход из кнопки «Преподаватель»
 async def start_teacher_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -72,7 +69,7 @@ async def on_error(update: object, context):
     except Exception:
         pass
 
-token_value = open("token.txt").readline()
+token_value = "8386694816:AAF-cqnzapG3xvWX2ZNIcSTbBkyms1FcQTY"
 
 def main():
     # Отключаем возможные системные прокси, чтобы httpx не лез в них
@@ -89,14 +86,11 @@ def main():
     # Хендлеры главного меню
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(schedule|homework|mail)$"))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    app.add_handler(CallbackQueryHandler(homework_callback, pattern="^hw_"))
     # Внутри меню расписания: «Расписание» и «Избранное»
     app.add_handler(CallbackQueryHandler(schedule_callback, pattern=r"^(schedule_groups|select_group)$"))
 
-    # Диалог расписания преподавателя (вход — кнопка «Преподаватель» или команда)
+# Диалог расписания преподавателя (вход — кнопка «Преподаватель» или команда)
     teacher_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(start_teacher_from_menu, pattern=r"^teachers_schedule$"),
