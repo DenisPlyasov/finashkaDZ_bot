@@ -1,17 +1,37 @@
-from fa_api import FaAPI
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+from telegram.constants import ParseMode
 
-#Создаем объект расписания
-fa = FaAPI()
+SCHEDULE_START_TEXT = (
+    "1️⃣ *Выберете какое расписание вы хотите посмотреть.*\n"
+    "Здесь вы сможете посмотреть расписание любой группы, расписание преподавателя или же лично ваше, когда добавите его в избранное."
+)
 
-#Ищем группу ПИ19-5
-group = fa.search_group("БИ25-6")
-#Получаем инфо о расписании группы ПИ19-5 на сегодня
-timetable = fa.timetable_group(group[0]["id"])
+async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("Расписание", callback_data="schedule_groups"),
+            InlineKeyboardButton("Преподаватель", callback_data="teachers_schedule"),
+            InlineKeyboardButton("Избранное", callback_data="select_group"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-#Ищем группу ПИ19-3
-group = fa.search_group("БИ25-6")
-#Получаем инфо о расписании группы ПИ19-3 с 01.10.2020 по 06.10.2020
-timetable = fa.timetable_group(group[0]["id"], "23.09.2025", "25.09.2025")
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            SCHEDULE_START_TEXT, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await update.message.reply_text(
+            SCHEDULE_START_TEXT, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
+        )
 
-#Выводим list с рсписанием
-print(timetable)
+async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "schedule_groups":
+        await query.edit_message_text("📅 Раздел с расписанием пока пуст.")
+    elif query.data == "select_group":
+        await query.edit_message_text("⭐ Раздел с избранным пока пуст.")
+    # ВАЖНО: НЕ обрабатываем "teachers_schedule" здесь — его ловит ConversationHandler из teachers_schedule.py
