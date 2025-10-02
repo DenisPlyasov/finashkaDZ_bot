@@ -67,21 +67,46 @@ def connect_gsheet():
     client = gspread.authorize(creds)
     return client.open(GSHEET_NAME)
 
+# -------------------- Google Sheets --------------------
+def connect_gsheet():
+    creds = ServiceAccountCredentials.from_json_keyfile_name(GSHEET_CREDS, SCOPE)
+    client = gspread.authorize(creds)
+    return client.open(GSHEET_NAME)
+
 def append_homework_to_sheet(group: str, subject: str, deadline: str, task: str, attachment: str):
+    """
+    Добавляет домашку в Google Sheets.
+    Если вкладка с названием группы не существует — создаёт её и добавляет заголовки.
+    """
     sheet = connect_gsheet()
-    ws = sheet.worksheet(group.strip())
+    group_name = group.strip()
+
+    try:
+        ws = sheet.worksheet(group_name)
+    except gspread.exceptions.WorksheetNotFound:
+        # создаём новую вкладку с именем группы
+        ws = sheet.add_worksheet(title=group_name, rows="100", cols="10")
+        # добавляем заголовки для удобства
+        ws.append_row(["subject", "deadline", "task", "attachment"])
+
+    # добавляем саму домашку
     ws.append_row([subject, deadline, task, attachment])
 
 def get_homework_from_sheet(group: str):
+    """
+    Получает домашку из указанной вкладки.
+    """
     sheet = connect_gsheet()
+    group_name = group.strip()
     try:
-        ws = sheet.worksheet(group.strip())
+        ws = sheet.worksheet(group_name)
         records = ws.get_all_records()
         return records
     except gspread.exceptions.WorksheetNotFound:
-        raise Exception(f"В Google Таблице нет вкладки для группы {group}")
+        raise Exception(f"В Google Таблице нет вкладки для группы {group_name}")
     except Exception as e:
         raise Exception(f"Ошибка при чтении Google Sheets: {e}")
+
 
 # -------------------- Email --------------------
 def send_email_code(email: str, code: str):

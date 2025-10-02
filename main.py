@@ -1,6 +1,6 @@
 import os
 import logging
-
+from mail_check import add_mail_handlers
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -9,7 +9,10 @@ from telegram.ext import (
 )
 
 from schedule import schedule_menu, schedule_callback
+from mail_check import mail_entry
 import teachers_schedule as TS  # модуль с логикой преподавателей
+from homework import * 
+from homework import homework_menu, homework_callback, message_handler
 
 # ===== ЛОГГЕРЫ =====
 logging.basicConfig(
@@ -39,9 +42,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "schedule":
         await schedule_menu(update, context)
     elif q.data == "mail":
-        await q.edit_message_text("📧 Раздел с почтой пока пуст.")
+        await mail_entry(update, context)
     elif q.data == "homework":
-        await q.edit_message_text("📚 Раздел с домашкой пока пуст.")
+        await homework_menu(update, context)
+    elif q.data.startswith("hw_"):
+        await homework_callback(update, context)
 
 # вход из кнопки «Преподаватель»
 async def start_teacher_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -69,7 +74,7 @@ async def on_error(update: object, context):
     except Exception:
         pass
 
-token_value = "8386694816:AAF-cqnzapG3xvWX2ZNIcSTbBkyms1FcQTY"
+token_value = open('token.txt').readline()
 
 def main():
     # Отключаем возможные системные прокси, чтобы httpx не лез в них
@@ -83,9 +88,10 @@ def main():
         .build()
     )
 
-    # Хендлеры главного меню
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(schedule|homework|mail)$"))
+
+    app.add_handler(CallbackQueryHandler(homework_callback, pattern="^hw_"))
 
     # Внутри меню расписания: «Расписание» и «Избранное»
     app.add_handler(CallbackQueryHandler(schedule_callback, pattern=r"^(schedule_groups|select_group)$"))
@@ -109,10 +115,35 @@ def main():
         per_message=False,
     )
     app.add_handler(teacher_conv)
-
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(on_error)
 
-    log.info("✅ Бот запущен (polling)…")
+
+
+
+    # 1. Команда старт
+    app.add_handler(CommandHandler("start", start))
+
+    # 2. Главные кнопки верхнего уровня
+    app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(schedule|homework|mail)$"))
+
+    # 3. Домашняя работа
+    app.add_handler(CallbackQueryHandler(homework_callback, pattern=r"^hw_"))
+
+    # 6. Общий button_handler для остальных колбэков
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    # 7. Текстовые сообщения
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+    # 8. Ошибки
+    app.add_error_handler(on_error)
+
+
+
+
+    print("✅ Бот запущен (polling)…")
     # НИЧЕГО асинхронно не вызываем ДО run_polling — никаких asyncio.run!
     app.run_polling(
         poll_interval=1.0,
