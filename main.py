@@ -1,6 +1,6 @@
 import os
 import logging
-
+from mail_check import add_mail_handlers
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -9,6 +9,7 @@ from telegram.ext import (
 )
 
 from schedule import schedule_menu, schedule_callback
+from mail_check import mail_entry
 import teachers_schedule as TS  # модуль с логикой преподавателей
 from homework import * 
 from homework import homework_menu, homework_callback, message_handler
@@ -41,7 +42,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "schedule":
         await schedule_menu(update, context)
     elif q.data == "mail":
-        await q.edit_message_text("📧 Раздел с почтой пока пуст.")
+        await mail_entry(update, context)
     elif q.data == "homework":
         await homework_menu(update, context)
     elif q.data.startswith("hw_"):
@@ -129,28 +130,6 @@ def main():
 
     # 3. Домашняя работа
     app.add_handler(CallbackQueryHandler(homework_callback, pattern=r"^hw_"))
-
-    # 4. Расписание (группы и избранное)
-    # app.add_handler(CallbackQueryHandler(schedule_callback, pattern=r"^(schedule_groups|select_group)$"))
-
-    # # 5. Диалог расписания преподавателя
-    # teacher_conv = ConversationHandler(
-    #     entry_points=[
-    #         CallbackQueryHandler(start_teacher_from_menu, pattern=r"^teachers_schedule$"),
-    #         CommandHandler("teacher_schedule", TS.cmd_start),
-    #     ],
-    #     states={
-    #         TS.ASK_TEACHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, TS.on_teacher_surname)],
-    #         TS.CHOOSE_TEACHER: [CallbackQueryHandler(TS.on_pick_teacher, pattern=r"^pick_teacher:")],
-    #         TS.CHOOSE_RANGE: [CallbackQueryHandler(TS.on_pick_range, pattern=r"^range:")],
-    #         TS.ASK_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, TS.on_custom_date)],
-    #     },
-    #     fallbacks=[CommandHandler("teacher_schedule", TS.cmd_start)],
-    #     name="timetable_conv",
-    #     persistent=False,
-    #     per_message=False,
-    # )
-    # app.add_handler(teacher_conv)
 
     # 6. Общий button_handler для остальных колбэков
     app.add_handler(CallbackQueryHandler(button_handler))
