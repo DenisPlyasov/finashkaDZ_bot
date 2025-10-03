@@ -7,7 +7,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler, Defaults
 )
-
+from schedule_groups import build_schedule_groups_conv, start as groups_start
 from schedule import schedule_menu, schedule_callback
 from mail_check import mail_entry
 import teachers_schedule as TS  # модуль с логикой преподавателей
@@ -88,15 +88,30 @@ def main():
         .build()
     )
 
+    # 0) Диалог расписаний ГРУПП — ДОЛЖЕН идти первым
+    from schedule_groups import build_schedule_groups_conv, start as groups_start
+
+    schedule_conv = build_schedule_groups_conv(
+        entry_points=[
+            CallbackQueryHandler(groups_start, pattern=r"^schedule_groups$"),
+            CommandHandler("schedule", groups_start),
+        ]
+    )
+    app.add_handler(schedule_conv)
+
+    # 1) Команда старт
     app.add_handler(CommandHandler("start", start))
+
+    # 2) Главные кнопки верхнего уровня
     app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(schedule|homework|mail)$"))
 
-    app.add_handler(CallbackQueryHandler(homework_callback, pattern="^hw_"))
+    # 3) Домашняя работа
+    app.add_handler(CallbackQueryHandler(homework_callback, pattern=r"^hw_"))
 
-    # Внутри меню расписания: «Расписание» и «Избранное»
-    app.add_handler(CallbackQueryHandler(schedule_callback, pattern=r"^(schedule_groups|select_group)$"))
+    # 4) Меню расписания (БЕЗ 'schedule_groups', чтобы не перехватывать вход в диалог)
+    app.add_handler(CallbackQueryHandler(schedule_callback, pattern=r"^select_group$"))
 
-# Диалог расписания преподавателя (вход — кнопка «Преподаватель» или команда)
+    # 5) Диалог расписания преподавателей
     teacher_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(start_teacher_from_menu, pattern=r"^teachers_schedule$"),
@@ -111,35 +126,18 @@ def main():
         fallbacks=[CommandHandler("teacher_schedule", TS.cmd_start)],
         name="timetable_conv",
         persistent=False,
-        # ВАЖНО: per_message должен быть False, т.к. есть MessageHandler
         per_message=False,
     )
     app.add_handler(teacher_conv)
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.add_error_handler(on_error)
 
-
-
-
-    # 1. Команда старт
-    app.add_handler(CommandHandler("start", start))
-
-    # 2. Главные кнопки верхнего уровня
-    app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(schedule|homework|mail)$"))
-
-    # 3. Домашняя работа
-    app.add_handler(CallbackQueryHandler(homework_callback, pattern=r"^hw_"))
-
-    # 6. Общий button_handler для остальных колбэков
+    # 6) Общий колбэк (ловит прочие callback_data)
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # 7. Текстовые сообщения
+    # 7) Текстовые сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    # 8. Ошибки
+    # 8) Ошибки — ровно один раз
     app.add_error_handler(on_error)
-
 
 
 
