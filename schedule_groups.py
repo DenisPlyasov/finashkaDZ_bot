@@ -128,11 +128,173 @@ def _time_range_of(lesson: dict) -> str:
 
 # ------- парсинг времени в минуты для расчёта перерывов
 
+def _join_fio(last: str, first: str, middle: str) -> str:
+    parts = [p.strip() for p in (last, first, middle) if isinstance(p, str) and p.strip()]
+    return " ".join(parts)
+
+# «Фамилия И. О.» / «Фамилия И.О.»
+_INITIALS_RE = re.compile(r"^[А-ЯA-ZЁ][а-яa-zё\-]+(?:\s+[А-ЯA-Z]\.\s*[А-ЯA-Z]\.)$")
+
+def _fio_from_dict(t: dict) -> str:
+    # Явные «полные» поля
+    full = (
+        t.get("teacher_full") or t.get("full_name") or t.get("fio_full")
+        or t.get("fioFull") or t.get("name_full") or t.get("display_name")
+    )
+    if isinstance(full, str) and full.strip():
+        return full.strip()
+
+    # Раздельные поля: и snake_case, и camelCase
+    last  = t.get("last_name")   or t.get("lastName")   or t.get("surname") or t.get("family") or t.get("family_name")
+    first = t.get("first_name")  or t.get("firstName")  or t.get("given_name") or t.get("name")
+    mid   = t.get("middle_name") or t.get("middleName") or t.get("patronymic") or t.get("second_name") or t.get("secondName")
+
+    fio = _join_fio(last or "", first or "", mid or "")
+    if fio:
+        return fio
+
+    # Иногда кладут «fio», но там бывает короткое — отфильтруем инициалы
+    fio_any = t.get("fio") or t.get("teacher") or t.get("lecturer") or t.get("title") or t.get("short_name")
+    if isinstance(fio_any, str) and fio_any.strip() and not _INITIALS_RE.match(fio_any.strip()):
+        return fio_any.strip()
+
+    # Фолбэк — что есть
+    return (fio_any or "").strip()
+
+def _get_teacher_full(lesson: dict) -> str:
+    # 1) массив преподавателей
+    for key in ("teachers", "lecturers"):
+        arr = lesson.get(key)
+        if isinstance(arr, list) and arr:
+            out = []
+            for t in arr:
+                out.append(_fio_from_dict(t) if isinstance(t, dict) else str(t).strip())
+            return "; ".join(filter(None, out))
+
+    # 2) словарь с данными препода
+    for key in ("teacher", "lecturer", "teacher_info"):
+        t = lesson.get(key)
+        if isinstance(t, dict):
+            return _fio_from_dict(t)
+
+    # 3) прямые строковые «полные» поля
+    direct = (
+        lesson.get("teacher_full") or lesson.get("full_name") or lesson.get("fio_full")
+        or lesson.get("fioFull") or lesson.get("name_full")
+    )
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    # 4) запасные строковые — но не инициалы
+    s = (
+        lesson.get("teacher") or lesson.get("lecturer") or lesson.get("teacher_name")
+        or lesson.get("prepod") or lesson.get("fio") or lesson.get("title_teacher")
+    )
+    s = (s or "").strip()
+    if s and not _INITIALS_RE.match(s):
+        return s
+    return s  # если пришли только инициалы — расширять не из чего
+
 def _hhmm_to_min(s: str) -> Optional[int]:
     m = re.match(r"^\s*(\d{1,2}):(\d{2})", s or "")
     if not m:
         return None
     return int(m.group(1)) * 60 + int(m.group(2))
+
+def _get_teacher_full(lesson: dict) -> str:
+    """
+    Пытаемся получить ПОЛНОЕ ФИО.
+    Поддерживаем варианты: 'teacher_full', 'full_name', 'fio', раздельные last/first/middle,
+    а также массив преподов.
+    """
+    # 1) массив/список преподов
+    if isinstance(lesson.get("teachers") or lesson.get("lecturers"), list):
+        items = lesson.get("teachers") or lesson.get("lecturers")
+        out = []
+        for t in items:
+            if isinstance(t, dict):
+                fio = _first_str(
+                    t.get("teacher_full"), t.get("full_name"), t.get("fio"),
+                    _join_fio(t.get("last_name") or t.get("surname") or t.get("family") or "",
+                              t.get("first_name") or t.get("name") or "",
+                              t.get("middle_name") or t.get("patronymic") or "")
+                )
+            else:
+                fio = str(t)
+            if fio:
+                out.append(fio)
+        return "; ".join(out)
+
+    # 2) дикт с раздельными полями
+    if isinstance(lesson.get("teacher") or lesson.get("lecturer") or lesson.get("teacher_info"), dict):
+        t = lesson.get("teacher") or lesson.get("lecturer") or lesson.get("teacher_info")
+        return _first_str(
+            t.get("teacher_full"), t.get("full_name"), t.get("fio"),
+            _join_fio(t.get("last_name") or t.get("surname") or t.get("family") or "",
+                      t.get("first_name") or t.get("name") or "",
+                      t.get("middle_name") or t.get("patronymic") or "")
+        )
+
+    # 3) строковые поля
+    return _first_str(
+        lesson.get("teacher_full"), lesson.get("teacherFio"), lesson.get("teacher_fio"),
+        lesson.get("full_name"), lesson.get("fio"),
+        lesson.get("teacher"), lesson.get("lecturer"), lesson.get("teacher_name"), lesson.get("prepod")
+    )
+
+def _normalize_ltype(s: str) -> str:
+    """Приводим тип к русскому виду: лекция/семинар/практика/лабораторная/коллоквиум/консультация."""
+    if not isinstance(s, str):
+        return ""
+    x = s.strip().lower()
+    if not x:
+        return ""
+    # частые значения
+    mapping = {
+        "lecture": "лекция",
+        "лекция": "лекция",
+        "seminar": "семинар",
+        "семинар": "семинар",
+        "practice": "практика",
+        "практика": "практика",
+        "lab": "лабораторная",
+        "лаб": "лабораторная",
+        "лабораторная": "лабораторная",
+        "colloquium": "коллоквиум",
+        "consultation": "консультация",
+        "консультация": "консультация",
+        "зачёт": "зачёт",
+        "зачет": "зачёт",
+        "экзамен": "экзамен",
+    }
+    # иногда приходит вроде "Lecture", "seminar (stream)" и пр.
+    for k, v in mapping.items():
+        if k in x:
+            return v
+    return s.strip()
+
+def _find_online_link(lesson: dict) -> str:
+    """
+    Ищем URL онлайн-занятия в разных полях/вложениях.
+    Возвращаем чистый http(s) URL или ''.
+    """
+    candidates = [
+        lesson.get("link"), lesson.get("url"), lesson.get("webinar"),
+        lesson.get("web_url"), lesson.get("online_link"), lesson.get("conference_url"),
+        lesson.get("zoom"), lesson.get("teams"), lesson.get("meet"), lesson.get("bbb"),
+        lesson.get("lms_url")
+    ]
+    # вложенные
+    for k in ("online", "conference", "webinar", "meeting"):
+        obj = lesson.get(k)
+        if isinstance(obj, dict):
+            candidates.extend([obj.get("url"), obj.get("link")])
+
+    # вытащим первую годную http(s)
+    for c in candidates:
+        if isinstance(c, str) and c.strip().startswith(("http://", "https://")):
+            return c.strip()
+    return ""
 
 def _range_to_bounds(time_range: str) -> Tuple[Optional[int], Optional[int]]:
     """Вернёт (start_min, end_min) для 'HH:MM-HH:MM'."""
@@ -149,17 +311,7 @@ def _int_or_zero(x) -> int:
 
 def _extract_lesson_fields(lesson: dict) -> dict:
     time_range = _time_range_of(lesson)
-    teacher = (
-        lesson.get("teacher")
-        or lesson.get("lecturer")
-        or lesson.get("teacher_name")
-        or lesson.get("prepod")
-        or ""
-    )
-    if isinstance(teacher, dict):
-        teacher = teacher.get("name", "")
-    if isinstance(teacher, list):
-        teacher = ", ".join([t.get("name", "") if isinstance(t, dict) else str(t) for t in teacher])
+    teacher = _get_teacher_full(lesson)  # <-- ПОЛНОЕ ФИО
 
     room = (
         lesson.get("room")
@@ -177,13 +329,14 @@ def _extract_lesson_fields(lesson: dict) -> dict:
         or ""
     ).strip()
 
-    ltype = (
+    ltype_raw = (
         lesson.get("type")
         or lesson.get("lesson_type")
         or lesson.get("format")
         or lesson.get("kind")
         or ""
-    ).strip()
+    )
+    ltype = _normalize_ltype(ltype_raw)
 
     brk = (
         lesson.get("break")
@@ -193,13 +346,16 @@ def _extract_lesson_fields(lesson: dict) -> dict:
         or 0
     )
 
+    link = _find_online_link(lesson)
+
     return {
         "time": time_range,
         "teacher": str(teacher).strip(),
         "room": str(room).strip(),
         "title": title,
-        "ltype": ltype,
+        "ltype": ltype,      # уже нормализовано
         "break": _int_or_zero(brk),
+        "link": link,        # ⬅ добавили
     }
 
 def _group_by_date(data) -> Dict[str, List[dict]]:
@@ -231,31 +387,35 @@ def _filter_lessons_by_date(data, target_api_date: str):
 def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header: Optional[str] = None) -> str:
     d = datetime.strptime(date_str, DATE_FMT_API)
     dow_nom = _RU_WEEKDAY_NOM[d.weekday()]
-    header_title = f"Расписание для {group_name_for_header or ''}".strip()
-    header = f"<b>{header_title} на {dow_nom} ({d.strftime('%Y-%m-%d')}):</b>"
+
+    gtitle = (group_name_for_header or "").strip()
+    header = f"Расписание <b>{gtitle}</b> на {dow_nom} ({d.strftime('%Y-%m-%d')}):"
 
     if not lessons:
         return f"{header}\n\nНет занятий"
 
-    # нормализация записей
     norm = []
     for x in lessons:
         f = _extract_lesson_fields(x)
-        # обязательно подставим time из разных мест
         if not f["time"]:
             f["time"] = _time_range_of(x)
         norm.append(f)
 
-    # группируем по тайм-слоту (когда в одно и то же время несколько подгрупп)
     slots: Dict[str, List[dict]] = {}
     for f in norm:
         slots.setdefault(f["time"], []).append(f)
+
+    def _range_to_bounds(t: str):
+        m = re.match(r"^(\d{2}):(\d{2})-(\d{2}):(\d{2})$", t or "")
+        if not m:
+            return None, None
+        h1, m1, h2, m2 = map(int, m.groups())
+        return h1 * 60 + m1, h2 * 60 + m2
 
     def _time_key(t: str) -> int:
         s, _ = _range_to_bounds(t)
         return s if s is not None else 10**9
 
-    # отсортированный список слотов по началу
     slot_keys = sorted(slots.keys(), key=_time_key)
 
     lines: List[str] = [header, ""]
@@ -266,42 +426,44 @@ def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header
         if i > 0:
             lines.append("")  # пустая строка между слотами
 
-        # внутри одного слота — печатаем подряд пары (без пустых строк меж ними)
         for f in slot:
-            # первая строка "08:30-10:00. ФИО — Ауд."
-            first_line = ""
+            # 1-я строка: "<b>08:30-10:00</b>. <code>ФИО</code> — Ауд. (онлайн)"
+            first_line_parts = []
             if f["time"]:
-                first_line += f"{f['time']}."
+                first_line_parts.append(f"<b>{f['time']}</b>.")
             if f["teacher"]:
-                first_line += f" {f['teacher']}"
+                # удобно копировать целиком
+                first_line_parts.append(f"<code>{f['teacher']}</code>")
             if f["room"]:
-                first_line += f" — {f['room']}."
-            lines.append(first_line.strip())
+                first_line_parts.append(f"— {f['room']}.")
+            # ссылка на вебинар (если есть) — компактно в конце первой строки
+            if f.get("link"):
+                first_line_parts.append(f'(<a href="{f["link"]}">онлайн</a>)')
+            first_line = " ".join(first_line_parts).strip()
+            if not first_line.endswith(".") and not first_line.endswith(")"):
+                first_line += "."
+            lines.append(first_line)
 
-            # вторая строка "Предмет (тип)."
-            second_line = f["title"]
+            # 2-я строка: "Предмет (<i>тип</i>)."
+            second_line = f["title"].strip()
             if f["ltype"]:
                 second_line += f" ({f['ltype']})"
             if second_line and not second_line.endswith("."):
                 second_line += "."
-            lines.append(second_line.strip())
+            lines.append(second_line)
 
-        # ---------- Автоматический подсчёт перерыва до следующего слота ----------
-        # если у следующего слота начало позже конца текущего — печатаем "Перерыв N минут."
+        # Перерыв между слотами
         cur_start, cur_end = _range_to_bounds(t)
         if cur_end is None:
-            # запасной вариант — если не удалось распарсить время, попробуем по максимальному "end" из предметов
             cur_end = max((_range_to_bounds(f["time"])[1] or 0) for f in slot)
-
         if i + 1 < len(slot_keys):
             next_start, _ = _range_to_bounds(slot_keys[i + 1])
             if next_start is not None and cur_end is not None:
                 gap = next_start - cur_end
-                # иногда в данных есть прямой break — пусть будет «верхней границей»
-                declared_break = max((f.get("break") or 0) for f in slot)
-                brk = max(gap, declared_break) if gap is not None else declared_break
+                declared = max((f.get("break") or 0) for f in slot)
+                brk = max(gap, declared)
                 if brk and brk > 0:
-                    lines.append(f"Перерыв {brk} минут.")
+                    lines.append(f"<i>Перерыв {brk} минут.</i>")
 
     return "\n".join(lines).rstrip()
 
