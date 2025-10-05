@@ -76,13 +76,70 @@ def _lesson_date_api(lesson: dict) -> str:
             return f"{y}.{mo}.{d}"
     return datetime.now().strftime("%Y.%m.%d")
 
+def _first_str(*vals) -> str:
+    """Вернёт первый непустой str из набора значений."""
+    for v in vals:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+def _get_time_begin(lesson: dict) -> str:
+    # самые частые алиасы «начала»
+    return _first_str(
+        lesson.get("begin"),
+        lesson.get("begin_time"),
+        lesson.get("time_from"),
+        lesson.get("start_time"),
+        lesson.get("start"),
+        lesson.get("timeStart"),
+        lesson.get("startTime"),
+        lesson.get("beginLesson"),
+        lesson.get("time_begin"),
+    )
+
+def _get_time_end(lesson: dict) -> str:
+    # самые частые алиасы «конца»
+    return _first_str(
+        lesson.get("end"),
+        lesson.get("end_time"),
+        lesson.get("time_to"),
+        lesson.get("finish"),
+        lesson.get("timeEnd"),
+        lesson.get("endTime"),
+        lesson.get("endLesson"),
+        lesson.get("time_end"),
+    )
+
 def _time_range_of(lesson: dict) -> str:
-    t = (lesson.get("time") or "").strip()
+    """Вернёт 'HH:MM-HH:MM' из множества возможных полей."""
+    # иногда API отдаёт сразу интервал одним полем
+    t = _first_str(
+        lesson.get("time"),
+        lesson.get("lesson_time"),
+        lesson.get("lessonTime"),
+        lesson.get("para"),          # у некоторых API «пара» уже строкой "08:30-10:00"
+    )
     if t:
         return t
-    b = (lesson.get("begin") or lesson.get("time_from") or lesson.get("start_time") or "").strip()
-    e = (lesson.get("end") or lesson.get("time_to") or lesson.get("end_time") or "").strip()
+
+    b = _get_time_begin(lesson)
+    e = _get_time_end(lesson)
     return f"{b}-{e}" if b and e else ""
+
+# ------- парсинг времени в минуты для расчёта перерывов
+
+def _hhmm_to_min(s: str) -> Optional[int]:
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})", s or "")
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+def _range_to_bounds(time_range: str) -> Tuple[Optional[int], Optional[int]]:
+    """Вернёт (start_min, end_min) для 'HH:MM-HH:MM'."""
+    if not isinstance(time_range, str) or "-" not in time_range:
+        return None, None
+    left, right = time_range.split("-", 1)
+    return _hhmm_to_min(left), _hhmm_to_min(right)
 
 def _int_or_zero(x) -> int:
     try:
@@ -180,24 +237,38 @@ def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header
     if not lessons:
         return f"{header}\n\nНет занятий"
 
-    norm = [_extract_lesson_fields(x) for x in lessons]
+    # нормализация записей
+    norm = []
+    for x in lessons:
+        f = _extract_lesson_fields(x)
+        # обязательно подставим time из разных мест
+        if not f["time"]:
+            f["time"] = _time_range_of(x)
+        norm.append(f)
+
+    # группируем по тайм-слоту (когда в одно и то же время несколько подгрупп)
     slots: Dict[str, List[dict]] = {}
     for f in norm:
         slots.setdefault(f["time"], []).append(f)
 
     def _time_key(t: str) -> int:
-        m = re.match(r"^(\d{2}):(\d{2})", t or "")
-        return (int(m.group(1)) * 60 + int(m.group(2))) if m else 10**9
+        s, _ = _range_to_bounds(t)
+        return s if s is not None else 10**9
+
+    # отсортированный список слотов по началу
+    slot_keys = sorted(slots.keys(), key=_time_key)
 
     lines: List[str] = [header, ""]
-    first_slot = True
-    for t in sorted(slots.keys(), key=_time_key):
-        slot = slots[t]
-        if not first_slot:
-            lines.append("")
-        first_slot = False
 
+    for i, t in enumerate(slot_keys):
+        slot = slots[t]
+
+        if i > 0:
+            lines.append("")  # пустая строка между слотами
+
+        # внутри одного слота — печатаем подряд пары (без пустых строк меж ними)
         for f in slot:
+            # первая строка "08:30-10:00. ФИО — Ауд."
             first_line = ""
             if f["time"]:
                 first_line += f"{f['time']}."
@@ -207,6 +278,7 @@ def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header
                 first_line += f" — {f['room']}."
             lines.append(first_line.strip())
 
+            # вторая строка "Предмет (тип)."
             second_line = f["title"]
             if f["ltype"]:
                 second_line += f" ({f['ltype']})"
@@ -214,9 +286,22 @@ def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header
                 second_line += "."
             lines.append(second_line.strip())
 
-        brk = max((f["break"] or 0) for f in slot)
-        if brk > 0:
-            lines.append(f"Перерыв {brk} минут.")
+        # ---------- Автоматический подсчёт перерыва до следующего слота ----------
+        # если у следующего слота начало позже конца текущего — печатаем "Перерыв N минут."
+        cur_start, cur_end = _range_to_bounds(t)
+        if cur_end is None:
+            # запасной вариант — если не удалось распарсить время, попробуем по максимальному "end" из предметов
+            cur_end = max((_range_to_bounds(f["time"])[1] or 0) for f in slot)
+
+        if i + 1 < len(slot_keys):
+            next_start, _ = _range_to_bounds(slot_keys[i + 1])
+            if next_start is not None and cur_end is not None:
+                gap = next_start - cur_end
+                # иногда в данных есть прямой break — пусть будет «верхней границей»
+                declared_break = max((f.get("break") or 0) for f in slot)
+                brk = max(gap, declared_break) if gap is not None else declared_break
+                if brk and brk > 0:
+                    lines.append(f"Перерыв {brk} минут.")
 
     return "\n".join(lines).rstrip()
 
