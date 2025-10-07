@@ -28,6 +28,8 @@ fa = FaAPI()
 
 logger = logging.getLogger("fa-bot")
 
+_URL_RE = re.compile(r"(https?://[^\s<>()]+)", re.IGNORECASE)
+
 # ================== ВСПОМОГАТЕЛЬНОЕ ==================
 _RU_WEEKDAY_NOM = {
     0: "понедельник",
@@ -161,39 +163,6 @@ def _fio_from_dict(t: dict) -> str:
     # Фолбэк — что есть
     return (fio_any or "").strip()
 
-def _get_teacher_full(lesson: dict) -> str:
-    # 1) массив преподавателей
-    for key in ("teachers", "lecturers"):
-        arr = lesson.get(key)
-        if isinstance(arr, list) and arr:
-            out = []
-            for t in arr:
-                out.append(_fio_from_dict(t) if isinstance(t, dict) else str(t).strip())
-            return "; ".join(filter(None, out))
-
-    # 2) словарь с данными препода
-    for key in ("teacher", "lecturer", "teacher_info"):
-        t = lesson.get(key)
-        if isinstance(t, dict):
-            return _fio_from_dict(t)
-
-    # 3) прямые строковые «полные» поля
-    direct = (
-        lesson.get("teacher_full") or lesson.get("full_name") or lesson.get("fio_full")
-        or lesson.get("fioFull") or lesson.get("name_full")
-    )
-    if isinstance(direct, str) and direct.strip():
-        return direct.strip()
-
-    # 4) запасные строковые — но не инициалы
-    s = (
-        lesson.get("teacher") or lesson.get("lecturer") or lesson.get("teacher_name")
-        or lesson.get("prepod") or lesson.get("fio") or lesson.get("title_teacher")
-    )
-    s = (s or "").strip()
-    if s and not _INITIALS_RE.match(s):
-        return s
-    return s  # если пришли только инициалы — расширять не из чего
 
 def _hhmm_to_min(s: str) -> Optional[int]:
     m = re.match(r"^\s*(\d{1,2}):(\d{2})", s or "")
@@ -202,99 +171,171 @@ def _hhmm_to_min(s: str) -> Optional[int]:
     return int(m.group(1)) * 60 + int(m.group(2))
 
 def _get_teacher_full(lesson: dict) -> str:
-    """
-    Пытаемся получить ПОЛНОЕ ФИО.
-    Поддерживаем варианты: 'teacher_full', 'full_name', 'fio', раздельные last/first/middle,
-    а также массив преподов.
-    """
-    # 1) массив/список преподов
-    if isinstance(lesson.get("teachers") or lesson.get("lecturers"), list):
-        items = lesson.get("teachers") or lesson.get("lecturers")
+    # 0) FA-список с полным именем
+    if isinstance(lesson.get("listOfLecturers"), list):
         out = []
-        for t in items:
+        for t in lesson["listOfLecturers"]:
             if isinstance(t, dict):
-                fio = _first_str(
-                    t.get("teacher_full"), t.get("full_name"), t.get("fio"),
-                    _join_fio(t.get("last_name") or t.get("surname") or t.get("family") or "",
-                              t.get("first_name") or t.get("name") or "",
-                              t.get("middle_name") or t.get("patronymic") or "")
-                )
+                # В FA полное: lecturer_title
+                fio = t.get("lecturer_title") or t.get("full_name") or t.get("fio")
+                if not fio:
+                    fio = _join_fio(t.get("surname") or t.get("last_name") or "",
+                                    t.get("name") or t.get("first_name") or "",
+                                    t.get("patronymic") or t.get("middle_name") or "")
+                if fio:
+                    out.append(fio.strip())
             else:
-                fio = str(t)
-            if fio:
-                out.append(fio)
-        return "; ".join(out)
+                out.append(str(t).strip())
+        if out:
+            return "; ".join(out)
 
-    # 2) дикт с раздельными полями
-    if isinstance(lesson.get("teacher") or lesson.get("lecturer") or lesson.get("teacher_info"), dict):
-        t = lesson.get("teacher") or lesson.get("lecturer") or lesson.get("teacher_info")
-        return _first_str(
-            t.get("teacher_full"), t.get("full_name"), t.get("fio"),
-            _join_fio(t.get("last_name") or t.get("surname") or t.get("family") or "",
-                      t.get("first_name") or t.get("name") or "",
-                      t.get("middle_name") or t.get("patronymic") or "")
-        )
+    # 1) массив/список преподов из других API
+    for key in ("teachers", "lecturers"):
+        items = lesson.get(key)
+        if isinstance(items, list) and items:
+            out = []
+            for t in items:
+                if isinstance(t, dict):
+                    fio = (
+                        t.get("lecturer_title") or t.get("teacher_full") or t.get("full_name") or t.get("fio") or
+                        _join_fio(t.get("surname") or t.get("last_name") or "",
+                                  t.get("name") or t.get("first_name") or "",
+                                  t.get("patronymic") or t.get("middle_name") or "")
+                    )
+                else:
+                    fio = str(t)
+                if fio:
+                    out.append(fio.strip())
+            if out:
+                return "; ".join(out)
+
+    # 2) единичный словарь
+    for key in ("teacher", "lecturer", "teacher_info"):
+        t = lesson.get(key)
+        if isinstance(t, dict):
+            return (
+                t.get("lecturer_title") or t.get("teacher_full") or t.get("full_name") or t.get("fio") or
+                _join_fio(t.get("surname") or t.get("last_name") or "",
+                          t.get("name") or t.get("first_name") or "",
+                          t.get("patronymic") or t.get("middle_name") or "")
+            ).strip()
 
     # 3) строковые поля
-    return _first_str(
-        lesson.get("teacher_full"), lesson.get("teacherFio"), lesson.get("teacher_fio"),
-        lesson.get("full_name"), lesson.get("fio"),
-        lesson.get("teacher"), lesson.get("lecturer"), lesson.get("teacher_name"), lesson.get("prepod")
-    )
+    return (
+        lesson.get("lecturer_title") or
+        lesson.get("teacher_full") or lesson.get("teacherFio") or lesson.get("teacher_fio") or
+        lesson.get("full_name") or lesson.get("fio") or
+        lesson.get("lecturer") or lesson.get("teacher") or
+        lesson.get("teacher_name") or lesson.get("prepod") or ""
+    ).strip()
 
 def _normalize_ltype(s: str) -> str:
-    """Приводим тип к русскому виду: лекция/семинар/практика/лабораторная/коллоквиум/консультация."""
     if not isinstance(s, str):
         return ""
     x = s.strip().lower()
     if not x:
         return ""
-    # частые значения
-    mapping = {
-        "lecture": "лекция",
-        "лекция": "лекция",
-        "seminar": "семинар",
-        "семинар": "семинар",
-        "practice": "практика",
-        "практика": "практика",
-        "lab": "лабораторная",
-        "лаб": "лабораторная",
-        "лабораторная": "лабораторная",
-        "colloquium": "коллоквиум",
-        "consultation": "консультация",
-        "консультация": "консультация",
-        "зачёт": "зачёт",
-        "зачет": "зачёт",
-        "экзамен": "экзамен",
-    }
-    # иногда приходит вроде "Lecture", "seminar (stream)" и пр.
-    for k, v in mapping.items():
-        if k in x:
-            return v
+    # смотрим по подстрокам, чтобы покрыть "Лекции", "Практические (семинарские) занятия"
+    if "лекци" in x:         # лекция/лекции
+        return "лекция"
+    if "семинар" in x or "семинарск" in x:
+        return "семинар"
+    if "практичес" in x:
+        return "практика"
+    if "лаб" in x:
+        return "лабораторная"
+    if "коллоквиум" in x:
+        return "коллоквиум"
+    if "консультац" in x:
+        return "консультация"
+    if "зачет" in x or "зачёт" in x:
+        return "зачёт"
+    if "экзамен" in x:
+        return "экзамен"
     return s.strip()
 
+
+_URL_RE = re.compile(r"(https?://[^\s<>\)\]]+)", re.IGNORECASE)
+
 def _find_online_link(lesson: dict) -> str:
-    """
-    Ищем URL онлайн-занятия в разных полях/вложениях.
-    Возвращаем чистый http(s) URL или ''.
-    """
+    # прямые ключи из разных API
     candidates = [
         lesson.get("link"), lesson.get("url"), lesson.get("webinar"),
         lesson.get("web_url"), lesson.get("online_link"), lesson.get("conference_url"),
         lesson.get("zoom"), lesson.get("teams"), lesson.get("meet"), lesson.get("bbb"),
-        lesson.get("lms_url")
+        lesson.get("lms_url"), lesson.get("stream_url"), lesson.get("broadcast"),
+        lesson.get("video_link"),
+        # ⬇️ FA: url1/url2
+        lesson.get("url1"), lesson.get("url2"),
     ]
-    # вложенные
-    for k in ("online", "conference", "webinar", "meeting"):
+
+    # частые текстовые поля, где ссылка может “прятаться”
+    text_fields = [
+        "comment", "note", "notes", "desc", "description", "details", "info",
+        "message", "commentary", "extra", "remark", "title", "subject",
+        # ⬇️ FA: подписи к ссылкам
+        "url1_description", "url2_description",
+    ]
+    for k in text_fields:
+        val = lesson.get(k)
+        if isinstance(val, str):
+            m = _URL_RE.search(val)
+            if m:
+                candidates.append(m.group(1))
+
+    # вложенные объекты
+    for k in ("online", "conference", "webinar", "meeting", "stream"):
         obj = lesson.get(k)
         if isinstance(obj, dict):
             candidates.extend([obj.get("url"), obj.get("link")])
+            for tv in text_fields:
+                val = obj.get(tv)
+                if isinstance(val, str):
+                    m = _URL_RE.search(val)
+                    if m:
+                        candidates.append(m.group(1))
 
-    # вытащим первую годную http(s)
+    # вложения-списки
+    for k in ("attachments", "files", "links"):
+        arr = lesson.get(k)
+        if isinstance(arr, list):
+            for it in arr:
+                if isinstance(it, dict):
+                    u = it.get("url") or it.get("link")
+                    if isinstance(u, str):
+                        candidates.append(u)
+
+    # первый валидный http(s)
     for c in candidates:
-        if isinstance(c, str) and c.strip().startswith(("http://", "https://")):
-            return c.strip()
+        if isinstance(c, str):
+            url = c.strip().strip(").,]}>")
+            if url.lower().startswith(("http://", "https://")):
+                return url
     return ""
+
+def _is_online_lesson(lesson: dict) -> bool:
+    for k in ("online", "is_online", "remote", "distance", "distance_learning", "distant", "online_lesson"):
+        v = lesson.get(k)
+        if isinstance(v, bool) and v:
+            return True
+        if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "да"):
+            return True
+
+    room = (lesson.get("room") or lesson.get("auditorium") or lesson.get("place") or "") or ""
+    building = (lesson.get("building") or "") or ""
+    room_l = str(room).lower()
+    building_l = str(building).lower()
+
+    # ключевые маркеры
+    if any(x in room_l for x in ("онлайн", "дистан", "zoom", "teams", "webinar", "вкс", "bbb", "meet", "в.з.", "д.а.")):
+        return True
+    if "виртуаль" in building_l:  # "Виртуальное"
+        return True
+
+    if _find_online_link(lesson):
+        return True
+
+    return False
 
 def _range_to_bounds(time_range: str) -> Tuple[Optional[int], Optional[int]]:
     """Вернёт (start_min, end_min) для 'HH:MM-HH:MM'."""
@@ -311,7 +352,7 @@ def _int_or_zero(x) -> int:
 
 def _extract_lesson_fields(lesson: dict) -> dict:
     time_range = _time_range_of(lesson)
-    teacher = _get_teacher_full(lesson)  # <-- ПОЛНОЕ ФИО
+    teacher = _get_teacher_full(lesson)  # полное ФИО
 
     room = (
         lesson.get("room")
@@ -330,11 +371,12 @@ def _extract_lesson_fields(lesson: dict) -> dict:
     ).strip()
 
     ltype_raw = (
-        lesson.get("type")
-        or lesson.get("lesson_type")
-        or lesson.get("format")
-        or lesson.get("kind")
-        or ""
+            lesson.get("kindOfWork")  # ⬅️ FA
+            or lesson.get("type")
+            or lesson.get("lesson_type")
+            or lesson.get("format")
+            or lesson.get("kind")
+            or ""
     )
     ltype = _normalize_ltype(ltype_raw)
 
@@ -347,15 +389,17 @@ def _extract_lesson_fields(lesson: dict) -> dict:
     )
 
     link = _find_online_link(lesson)
+    is_online = _is_online_lesson(lesson)
 
     return {
         "time": time_range,
         "teacher": str(teacher).strip(),
         "room": str(room).strip(),
         "title": title,
-        "ltype": ltype,      # уже нормализовано
+        "ltype": ltype,
         "break": _int_or_zero(brk),
-        "link": link,        # ⬅ добавили
+        "link": link,
+        "is_online": is_online,
     }
 
 def _group_by_date(data) -> Dict[str, List[dict]]:
@@ -427,18 +471,21 @@ def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header
             lines.append("")  # пустая строка между слотами
 
         for f in slot:
-            # 1-я строка: "<b>08:30-10:00</b>. <code>ФИО</code> — Ауд. (онлайн)"
             first_line_parts = []
             if f["time"]:
                 first_line_parts.append(f"<b>{f['time']}</b>.")
             if f["teacher"]:
-                # удобно копировать целиком
+                # удобно копировать: тэг code
                 first_line_parts.append(f"<code>{f['teacher']}</code>")
             if f["room"]:
                 first_line_parts.append(f"— {f['room']}.")
-            # ссылка на вебинар (если есть) — компактно в конце первой строки
+
+            # пометка онлайн/ссылка
             if f.get("link"):
                 first_line_parts.append(f'(<a href="{f["link"]}">онлайн</a>)')
+            elif f.get("is_online"):
+                first_line_parts.append("(онлайн)")
+
             first_line = " ".join(first_line_parts).strip()
             if not first_line.endswith(".") and not first_line.endswith(")"):
                 first_line += "."
