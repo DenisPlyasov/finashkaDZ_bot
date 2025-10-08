@@ -17,6 +17,20 @@ from telegram.ext import (
 )
 from fa_api import FaAPI  # библиотека расписаний
 
+WELCOME_TEXT_MAIN = (
+    "Привет! 👋\n"
+    "Я — помощник студентов твоего университета. "
+    "Могу напоминать о парах, хранить расписание и помогать с домашкой.\n\n"
+    "Выбери одну из опций ниже:"
+)
+
+def _main_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Расписание", callback_data="schedule"),
+        InlineKeyboardButton("Домашняя работа", callback_data="homework"),
+        InlineKeyboardButton("Почта", callback_data="mail"),
+    ]])
+
 # ================== НАСТРОЙКИ / СОСТОЯНИЯ ==================
 ASK_GROUP, CHOOSE_GROUP, CHOOSE_RANGE, ASK_CUSTOM_DATE = range(4)
 
@@ -558,7 +572,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         send = update.message.reply_text
 
     await send(
-        "👋 Введите <b>название группы</b> (например, ПИ19-6):",
+        "3️⃣ Введите <b>название группы</b> (например, ПИ19-6):",
         parse_mode=ParseMode.HTML,
     )
     context.user_data.clear()
@@ -636,7 +650,18 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     action = query.data
 
     if action == "rng:cancel":
-        await query.edit_message_text("Отменено. Используйте /start чтобы начать снова.")
+        try:
+            await query.edit_message_text(
+                WELCOME_TEXT_MAIN,
+                reply_markup=_main_menu_kb(),
+            )
+        except Exception:
+            # На случай BadRequest: Message is not modified и т.п.
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=WELCOME_TEXT_MAIN,
+                reply_markup=_main_menu_kb(),
+            )
         return ConversationHandler.END
 
     if action == "rng:change_group":
@@ -690,10 +715,9 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if action == "rng:this_week":
         ws, we = _week_bounds(today)
         ds, de = _to_api_date(ws), _to_api_date(we)
-        grouped = {}
         try:
             raw = fa.timetable_group(gid, ds, de)
-            grouped = _group_by_date(raw)
+            grouped = _group_by_date(raw)  # {'YYYY.MM.DD': [lessons]}
         except Exception as e:
             logger.exception("Ошибка timetable this_week: %s", e)
             await query.edit_message_text("Источник временно недоступен. Попробуйте позже.", reply_markup=_kb_ranges())
@@ -706,51 +730,71 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
         chat_id = update.effective_chat.id
         sent_any = False
-        for date_str in sorted(grouped.keys()):
-            d = datetime.strptime(date_str, DATE_FMT_API)
-            if ws <= d <= we:
-                text_day = _fmt_day(date_str, grouped.get(date_str, []), gname)
+
+        # ЕДИНЫЙ ПРОХОД Пн→Вс
+        for i in range(7):
+            d = ws + timedelta(days=i)
+            ds_day = _to_api_date(d)
+
+            lessons_day = grouped.get(ds_day, None)
+            if lessons_day is None:
+                # если пакет не дал этот день — добираем точечно
+                try:
+                    raw_day = fa.timetable_group(gid, ds_day, ds_day)
+                    lessons_day = _filter_lessons_by_date(raw_day, ds_day)
+                except Exception:
+                    lessons_day = []
+
+            if lessons_day:
+                text_day = _fmt_day(ds_day, lessons_day, gname)
                 await context.bot.send_message(chat_id=chat_id, text=text_day, parse_mode=ParseMode.HTML)
                 sent_any = True
+
         if not sent_any:
             await context.bot.send_message(chat_id=chat_id, text="Нет занятий на этой неделе.")
+
         await context.bot.send_message(chat_id=chat_id, text="Выберите период:", reply_markup=_kb_ranges())
         return CHOOSE_RANGE
 
-    if action == "rng:next_week":
-        ws, we = _week_bounds(today + timedelta(days=7))
-        ds, de = _to_api_date(ws), _to_api_date(we)
-        grouped = {}
-        try:
-            raw = fa.timetable_group(gid, ds, de)
-            grouped = _group_by_date(raw)
-        except Exception as e:
-            logger.exception("Ошибка timetable next_week: %s", e)
-            await query.edit_message_text("Источник временно недоступен. Попробуйте позже.", reply_markup=_kb_ranges())
-            return CHOOSE_RANGE
-
-        await query.edit_message_text(
-            f"<b>Расписание для {gname} на след. неделю ({_to_human_date(ws)}–{_to_human_date(we)})</b>\n\nОтправляю по дням ниже ⬇️",
-            parse_mode=ParseMode.HTML,
-        )
-
-        chat_id = update.effective_chat.id
-        sent_any = False
-        for date_str in sorted(grouped.keys()):
-            d = datetime.strptime(date_str, DATE_FMT_API)
-            if ws <= d <= we:
-                text_day = _fmt_day(date_str, grouped.get(date_str, []), gname)
-                await context.bot.send_message(chat_id=chat_id, text=text_day, parse_mode=ParseMode.HTML)
-                sent_any = True
-        if not sent_any:
-            await context.bot.send_message(chat_id=chat_id, text="Нет занятий на следующей неделе.")
-        await context.bot.send_message(chat_id=chat_id, text="Выберите период:", reply_markup=_kb_ranges())
+    ws, we = _week_bounds(today + timedelta(days=7))
+    ds, de = _to_api_date(ws), _to_api_date(we)
+    try:
+        raw = fa.timetable_group(gid, ds, de)
+        grouped = _group_by_date(raw)
+    except Exception as e:
+        logger.exception("Ошибка timetable next_week: %s", e)
+        await query.edit_message_text("Источник временно недоступен. Попробуйте позже.", reply_markup=_kb_ranges())
         return CHOOSE_RANGE
 
-    if action == "rng:pick_date":
-        await query.edit_message_text("Введите дату в формате <b>ДД.ММ.ГГГГ</b>:", parse_mode=ParseMode.HTML)
-        return ASK_CUSTOM_DATE
+    await query.edit_message_text(
+        f"<b>Расписание для {gname} на следующую неделю ({_to_human_date(ws)}–{_to_human_date(we)})</b>\n\nОтправляю по дням ниже ⬇️",
+        parse_mode=ParseMode.HTML,
+    )
 
+    chat_id = update.effective_chat.id
+    sent_any = False
+
+    for i in range(7):
+        d = ws + timedelta(days=i)
+        ds_day = _to_api_date(d)
+
+        lessons_day = grouped.get(ds_day, None)
+        if lessons_day is None:
+            try:
+                raw_day = fa.timetable_group(gid, ds_day, ds_day)
+                lessons_day = _filter_lessons_by_date(raw_day, ds_day)
+            except Exception:
+                lessons_day = []
+
+        if lessons_day:
+            text_day = _fmt_day(ds_day, lessons_day, gname)
+            await context.bot.send_message(chat_id=chat_id, text=text_day, parse_mode=ParseMode.HTML)
+            sent_any = True
+
+    if not sent_any:
+        await context.bot.send_message(chat_id=chat_id, text="Нет занятий на следующей неделе.")
+
+    await context.bot.send_message(chat_id=chat_id, text="Выберите период:", reply_markup=_kb_ranges())
     return CHOOSE_RANGE
 
 async def ask_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -791,7 +835,19 @@ async def ask_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return CHOOSE_RANGE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Отменено. Используйте /start чтобы начать заново.")
+    # /cancel из любого состояния — сразу главное меню
+    chat_id = (update.effective_chat.id if update.effective_chat else None)
+    if update.message:
+        await update.message.reply_text(
+            WELCOME_TEXT_MAIN,
+            reply_markup=_main_menu_kb(),
+        )
+    elif chat_id:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=WELCOME_TEXT_MAIN,
+            reply_markup=_main_menu_kb(),
+        )
     return ConversationHandler.END
 
 # ================== СБОРКА CONVERSATION ==================
