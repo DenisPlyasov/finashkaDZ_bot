@@ -341,121 +341,91 @@ import re
 from datetime import datetime, timedelta
 
 async def send_homework_for_date(update, context, group: str, date_str: str):
-    """
-    Отправляет домашнюю работу из Google Sheets для указанной группы и даты (ДД.MM.YYYY).
-    Работает с разными форматами хранения дедлайнов (строка, словарь, число, datetime).
-    """
+    """Отправляет домашнюю работу из Google Sheets для указанной группы и даты (ДД.MM.ГГГГ)."""
     try:
-        homework_list = get_homework_from_sheet(group) or []
+        try:
+            homework_list = get_homework_from_sheet(group) or []
+        except Exception:
+            # если вкладки нет или ошибка в гугл-таблице — просто тихо выходим
+            return
 
-        # Вспомогательная нормализация значения дедлайна -> возвращает строку "ДД.MM.ГГГГ" или ""
         def _normalize_deadline(dl):
             if dl is None:
                 return ""
-            # если это словарь — попробуем несколько ключей и рекурсивно
             if isinstance(dl, dict):
-                # часто встречающиеся ключи
                 for k in ("deadline", "date", "day", "date_str", "start", "datetime", "value", "raw"):
                     if k in dl and dl[k]:
                         nd = _normalize_deadline(dl[k])
                         if nd:
                             return nd
-                # возможный формат { "year":..., "month":..., "day":... }
                 if all(k in dl for k in ("year", "month", "day")):
                     try:
                         return datetime(int(dl["year"]), int(dl["month"]), int(dl["day"])).strftime("%d.%m.%Y")
                     except Exception:
                         pass
                 return ""
-
-            # список — берем первое годное
             if isinstance(dl, (list, tuple)):
                 for it in dl:
                     nd = _normalize_deadline(it)
                     if nd:
                         return nd
                 return ""
-
-            # число — возможно Excel/Google serial date
             if isinstance(dl, (int, float)):
                 try:
-                    # Excel/Google serial: 1899-12-30 base (common)
                     base = datetime(1899, 12, 30)
                     date = base + timedelta(days=int(dl))
                     return date.strftime("%d.%m.%Y")
                 except Exception:
                     return str(dl)
-
-            # datetime объект
             if isinstance(dl, datetime):
                 return dl.strftime("%d.%m.%Y")
-
-            # строка — попробуем распарсить различными форматами
             if isinstance(dl, str):
                 s = dl.strip()
                 if not s:
                     return ""
-
-                # набор форматов, которые часто встречаются
                 fmts = [
-                    "%d.%m.%Y", "%d.%m.%y",
-                    "%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d",
-                    "%d/%m/%Y", "%m/%d/%Y",
-                    "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S"
+                    "%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d",
+                    "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S"
                 ]
                 for fmt in fmts:
                     try:
                         return datetime.strptime(s, fmt).strftime("%d.%m.%Y")
                     except Exception:
                         pass
-
-                # regex: YYYY.MM.DD or YYYY-MM-DD etc.
                 m = re.search(r"(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})", s)
                 if m:
                     y, mo, day = m.groups()
                     return f"{int(day):02d}.{int(mo):02d}.{int(y)}"
-
-                # regex: DD.MM.YYYY
                 m2 = re.search(r"(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{4})", s)
                 if m2:
                     dd, mm, yyyy = m2.groups()
                     return f"{int(dd):02d}.{int(mm):02d}.{int(yyyy)}"
-
-                # ничего не распознано — вернём строку как есть (на случай совпадения форматов)
                 return s
-
-            # прочие типы — просто строковое представление
             return str(dl)
-
-        # Отладочные логи (можно включить временно)
-        # print(f"[DEBUG] get_homework_from_sheet({group}) -> {len(homework_list)} items")
 
         todays_hw = []
         for hw in homework_list:
-            raw_deadline = hw.get("deadline") if isinstance(hw, dict) else None
+            if not isinstance(hw, dict):
+                continue
+            raw_deadline = hw.get("deadline")
             norm = _normalize_deadline(raw_deadline)
-            # если нет нормализованного, иногда поле называется иначе — попробуем другие ключи
-            if not norm and isinstance(hw, dict):
+            if not norm:
                 for alt in ("date", "deadline_date", "due", "due_date"):
-                    if alt in hw:
-                        norm = _normalize_deadline(hw.get(alt))
-                        if norm:
-                            break
-            # теперь сравниваем с целевой датой (date_str уже в "ДД.MM.ГГГГ")
+                    norm = _normalize_deadline(hw.get(alt))
+                    if norm:
+                        break
             if norm == date_str:
                 todays_hw.append(hw)
 
         if not todays_hw:
-            # ничего не отправляем, если домашних нет
-            return
+            return  # ничего не отправляем
 
-        # формируем и отправляем сообщение
         text_lines = [f"🧩 <b>Домашняя работа на {date_str}:</b>"]
         for hw in todays_hw:
-            subject = hw.get("subject", "-") if isinstance(hw, dict) else "-"
-            task = hw.get("task", "-") if isinstance(hw, dict) else "-"
-            dl_out = hw.get("deadline", "-") if isinstance(hw, dict) else "-"
-            att = hw.get("attachment", "") if isinstance(hw, dict) else ""
+            subject = hw.get("subject", "-")
+            task = hw.get("task", "-")
+            dl_out = hw.get("deadline", "-")
+            att = hw.get("attachment", "")
             text_lines.append(f"📘 <b>{subject}</b>: {task} (до {dl_out})")
             if att and att != "-":
                 text_lines.append(f"📎 {att}")
@@ -464,8 +434,5 @@ async def send_homework_for_date(update, context, group: str, date_str: str):
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode="HTML")
 
     except Exception as e:
-        # безопасная отправка ошибки (не рекурсируем)
-        try:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ Ошибка при получении домашней работы: {e}")
-        except Exception:
-            pass
+        # ничего не отправляем пользователю
+        return
