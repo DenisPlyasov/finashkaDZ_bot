@@ -4,7 +4,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Tuple, Dict, List, Any, Optional
 from collections import defaultdict
-
+from homework import send_homework_for_date
+##PINGUIN
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -16,7 +17,6 @@ from telegram.ext import (
     filters,
 )
 from fa_api import FaAPI  # библиотека расписаний
-from homework import send_homework_for_date
 
 WELCOME_TEXT_MAIN = (
     "Привет! 👋\n"
@@ -74,12 +74,6 @@ def _to_human_date(d: datetime) -> str:
     return d.strftime(DATE_FMT_HUMAN)
 
 def _week_bounds(dt: datetime) -> Tuple[datetime, datetime]:
-    """
-    Возвращает границы учебной недели (понедельник–воскресенье).
-    Если сегодня воскресенье — считаем, что "текущая неделя" начинается завтра (т.е. понедельник следующей).
-    """
-    if dt.weekday() == 6:  # воскресенье
-        dt = dt + timedelta(days=1)
     start = dt - timedelta(days=dt.weekday())
     end = start + timedelta(days=6)
     return start, end
@@ -579,7 +573,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         send = update.message.reply_text
 
     await send(
-        "👋 Введите <b>название группы</b> (например, ПИ19-6):",
+        "3️⃣ Введите <b>название группы</b> (например, ПИ19-6):",
         parse_mode=ParseMode.HTML,
     )
     context.user_data.clear()
@@ -651,26 +645,30 @@ async def choose_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     )
     return CHOOSE_RANGE
 
-
-
 async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     action = query.data
 
-    # ===== Отмена / смена группы =====
     if action == "rng:cancel":
         try:
-            await query.edit_message_text(WELCOME_TEXT_MAIN, reply_markup=_main_menu_kb())
+            await query.edit_message_text(
+                WELCOME_TEXT_MAIN,
+                reply_markup=_main_menu_kb(),
+            )
         except Exception:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=WELCOME_TEXT_MAIN, reply_markup=_main_menu_kb())
+            # На случай BadRequest: Message is not modified и т.п.
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=WELCOME_TEXT_MAIN,
+                reply_markup=_main_menu_kb(),
+            )
         return ConversationHandler.END
 
     if action == "rng:change_group":
         await query.edit_message_text("Введите новое название группы:")
         return ASK_GROUP
 
-    # ===== Проверка группы =====
     group = context.user_data.get("group")
     if not group:
         await query.edit_message_text("Группа не выбрана. Введите название группы:")
@@ -683,117 +681,176 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ASK_GROUP
 
     today = datetime.now()
-    chat_id = update.effective_chat.id
 
-    # ===== TOMORROW =====
+    if action == "rng:today":
+        d = today
+        ds = _to_api_date(d)
+        try:
+            chat_id = update.effective_chat.id
+            raw = fa.timetable_group(gid)
+            lessons = _filter_lessons_by_date(raw, ds)
+            text = _fmt_day(ds, lessons, gname)
+
+            # 1️⃣ Отправляем расписание
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML
+            )
+
+            # 2️⃣ Пробуем отправить домашку (без вывода ошибок)
+            date_str = _to_human_date(d)
+            try:
+                await send_homework_for_date(update, context, gname, date_str)
+            except Exception:
+                logger.warning("Не удалось получить домашку (today), пропускаю без вывода")
+
+            # 3️⃣ Сообщение с кнопками
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Выберите дальнейшее действие:",
+                reply_markup=_kb_ranges()
+            )
+
+        except Exception as e:
+            logger.exception("Ошибка timetable today: %s", e)
+            await query.edit_message_text(
+                "Источник временно недоступен. Попробуйте позже.",
+                reply_markup=_kb_ranges()
+            )
+        return CHOOSE_RANGE
+
+
     if action == "rng:tomorrow":
         d = today + timedelta(days=1)
         ds = _to_api_date(d)
         try:
+            chat_id = update.effective_chat.id
             start = _to_api_date(today)
             end = _to_api_date(today + timedelta(days=1))
             raw = fa.timetable_group(gid, start, end)
             grouped = _group_by_date(raw)
             lessons = grouped.get(ds, [])
+            text = _fmt_day(ds, lessons, gname)
 
-            if not lessons:  # нет занятий — пропускаем
-                await context.bot.send_message(chat_id=chat_id, text="Занятий завтра нет 👌")
-            else:
-                text = _fmt_day(ds, lessons, gname)
-                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+            # 1️⃣ Отправляем расписание
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML
+            )
 
-                # Домашка (если есть)
-                date_str = d.strftime("%d.%m.%Y")
-                try:
-                    await send_homework_for_date(update, context, gname, date_str)
-                except Exception:
-                    logger.warning("Не удалось получить домашку (tomorrow), пропускаю без ошибки")
+            # 2️⃣ Пробуем отправить домашку (без вывода ошибок)
+            date_str = _to_human_date(d)
+            try:
+                await send_homework_for_date(update, context, gname, date_str)
+            except Exception:
+                logger.warning("Не удалось получить домашку (tomorrow), пропускаю без вывода")
 
-            # Инлайн-кнопки после расписания / домашки
-            await context.bot.send_message(chat_id=chat_id, text="Выберите дальнейшее действие:", reply_markup=_kb_ranges())
+            # 3️⃣ Сообщение с кнопками
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Выберите дальнейшее действие:",
+                reply_markup=_kb_ranges()
+            )
 
         except Exception as e:
             logger.exception("Ошибка timetable tomorrow: %s", e)
-            await query.edit_message_text("Источник временно недоступен. Попробуйте позже.", reply_markup=_kb_ranges())
+            await query.edit_message_text(
+                "Источник временно недоступен. Попробуйте позже.",
+                reply_markup=_kb_ranges()
+            )
         return CHOOSE_RANGE
 
-    # ===== THIS WEEK =====
     if action == "rng:this_week":
         ws, we = _week_bounds(today)
         ds, de = _to_api_date(ws), _to_api_date(we)
         try:
             raw = fa.timetable_group(gid, ds, de)
-            grouped = _group_by_date(raw)
-
-            await query.edit_message_text(
-                f"<b>Расписание для {gname} на неделю ({_to_human_date(ws)}–{_to_human_date(we)})</b>\n\nОтправляю по дням ниже ⬇️",
-                parse_mode=ParseMode.HTML,
-            )
-
-            for offset in range(7):
-                d = ws + timedelta(days=offset)
-                date_str_api = _to_api_date(d)
-                lessons = grouped.get(date_str_api, [])
-
-                if not lessons:
-                    continue  # пропускаем день без занятий
-
-                text_day = _fmt_day(date_str_api, lessons, gname)
-                await context.bot.send_message(chat_id=chat_id, text=text_day, parse_mode=ParseMode.HTML)
-
-                date_for_hw = d.strftime("%d.%m.%Y")
-                try:
-                    await send_homework_for_date(update, context, gname, date_for_hw)
-                except Exception:
-                    logger.warning(f"Не удалось получить домашку ({date_for_hw}), пропускаю")
-
-            await context.bot.send_message(chat_id=chat_id, text="Выберите дальнейшее действие:", reply_markup=_kb_ranges())
-
+            grouped = _group_by_date(raw)  # {'YYYY.MM.DD': [lessons]}
         except Exception as e:
             logger.exception("Ошибка timetable this_week: %s", e)
             await query.edit_message_text("Источник временно недоступен. Попробуйте позже.", reply_markup=_kb_ranges())
+            return CHOOSE_RANGE
 
-        return CHOOSE_RANGE
+        await query.edit_message_text(
+            f"<b>Расписание для {gname} на неделю ({_to_human_date(ws)}–{_to_human_date(we)})</b>\n\nОтправляю по дням ниже ⬇️",
+            parse_mode=ParseMode.HTML,
+        )
 
-    # ===== NEXT WEEK =====
-    if action == "rng:next_week":
-        ws, we = _week_bounds(today + timedelta(days=7))
-        ds, de = _to_api_date(ws), _to_api_date(we)
-        try:
-            raw = fa.timetable_group(gid, ds, de)
-            grouped = _group_by_date(raw)
+        chat_id = update.effective_chat.id
+        sent_any = False
 
-            await query.edit_message_text(
-                f"<b>Расписание для {gname} на след. неделю ({_to_human_date(ws)}–{_to_human_date(we)})</b>\n\nОтправляю по дням ниже ⬇️",
-                parse_mode=ParseMode.HTML,
-            )
+        # ЕДИНЫЙ ПРОХОД Пн→Вс
+        for i in range(7):
+            d = ws + timedelta(days=i)
+            ds_day = _to_api_date(d)
 
-            for date_str_api in sorted(grouped.keys()):
-                d = datetime.strptime(date_str_api, DATE_FMT_API)
-                if not (ws <= d <= we):
-                    continue
-
-                lessons = grouped.get(date_str_api, [])
-                if not lessons:
-                    continue
-
-                text_day = _fmt_day(date_str_api, lessons, gname)
-                await context.bot.send_message(chat_id=chat_id, text=text_day, parse_mode=ParseMode.HTML)
-
-                date_for_hw = d.strftime("%d.%m.%Y")
+            lessons_day = grouped.get(ds_day, None)
+            if lessons_day is None:
+                # если пакет не дал этот день — добираем точечно
                 try:
-                    await send_homework_for_date(update, context, gname, date_for_hw)
+                    raw_day = fa.timetable_group(gid, ds_day, ds_day)
+                    lessons_day = _filter_lessons_by_date(raw_day, ds_day)
                 except Exception:
-                    logger.warning(f"Не удалось получить домашку ({date_for_hw}), пропускаю")
+                    lessons_day = []
 
-            await context.bot.send_message(chat_id=chat_id, text="Выберите дальнейшее действие:", reply_markup=_kb_ranges())
+            if lessons_day:
+                text_day = _fmt_day(ds_day, lessons_day, gname)
+                await context.bot.send_message(chat_id=chat_id, text=text_day, parse_mode=ParseMode.HTML)
+                date_str = _to_human_date(d)
+                await send_homework_for_date(update, context, gname, date_str)
+                sent_any = True
 
-        except Exception as e:
-            logger.exception("Ошибка timetable next_week: %s", e)
-            await query.edit_message_text("Источник временно недоступен. Попробуйте позже.", reply_markup=_kb_ranges())
+        if not sent_any:
+            await context.bot.send_message(chat_id=chat_id, text="Нет занятий на этой неделе.")
 
+        await context.bot.send_message(chat_id=chat_id, text="Выберите период:", reply_markup=_kb_ranges())
         return CHOOSE_RANGE
 
+    ws, we = _week_bounds(today + timedelta(days=7))
+    ds, de = _to_api_date(ws), _to_api_date(we)
+    try:
+        raw = fa.timetable_group(gid, ds, de)
+        grouped = _group_by_date(raw)
+    except Exception as e:
+        logger.exception("Ошибка timetable next_week: %s", e)
+        await query.edit_message_text("Источник временно недоступен. Попробуйте позже.", reply_markup=_kb_ranges())
+        return CHOOSE_RANGE
+
+    await query.edit_message_text(
+        f"<b>Расписание для {gname} на следующую неделю ({_to_human_date(ws)}–{_to_human_date(we)})</b>\n\nОтправляю по дням ниже ⬇️",
+        parse_mode=ParseMode.HTML,
+    )
+
+    chat_id = update.effective_chat.id
+    sent_any = False
+
+    for i in range(7):
+        d = ws + timedelta(days=i)
+        ds_day = _to_api_date(d)
+
+        lessons_day = grouped.get(ds_day, None)
+        if lessons_day is None:
+            try:
+                raw_day = fa.timetable_group(gid, ds_day, ds_day)
+                lessons_day = _filter_lessons_by_date(raw_day, ds_day)
+            except Exception:
+                lessons_day = []
+
+        if lessons_day:
+            text_day = _fmt_day(ds_day, lessons_day, gname)
+            await context.bot.send_message(chat_id=chat_id, text=text_day, parse_mode=ParseMode.HTML)
+            # Домашка на этот день
+            date_str = _to_human_date(d)
+            await send_homework_for_date(update, context, gname, date_str)
+            sent_any = True
+
+    if not sent_any:
+        await context.bot.send_message(chat_id=chat_id, text="Нет занятий на следующей неделе.")
+
+    await context.bot.send_message(chat_id=chat_id, text="Выберите период:", reply_markup=_kb_ranges())
+    return CHOOSE_RANGE
 
 async def ask_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     m = DATE_INPUT_RE.match((update.message.text or "").strip())
@@ -830,10 +887,24 @@ async def ask_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     text = _fmt_day(ds, lessons, gname)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_kb_ranges())
+    date_str = _to_human_date(d)
+    await send_homework_for_date(update, context, gname, date_str)
     return CHOOSE_RANGE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Отменено. Используйте /start чтобы начать заново.")
+    # /cancel из любого состояния — сразу главное меню
+    chat_id = (update.effective_chat.id if update.effective_chat else None)
+    if update.message:
+        await update.message.reply_text(
+            WELCOME_TEXT_MAIN,
+            reply_markup=_main_menu_kb(),
+        )
+    elif chat_id:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=WELCOME_TEXT_MAIN,
+            reply_markup=_main_menu_kb(),
+        )
     return ConversationHandler.END
 
 # ================== СБОРКА CONVERSATION ==================
