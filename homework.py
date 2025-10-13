@@ -20,8 +20,8 @@ BLACK_LIST = os.path.join(DATA_DIR, "black_list.json")
 # Google Sheets
 SCOPE = ["https://spreadsheets.google.com/feeds",
          "https://www.googleapis.com/auth/drive"]
-GSHEET_NAME = "homework"                       
-GSHEET_CREDS = "finashkadzbot-d8415e20cc18.json"  
+GSHEET_NAME = "homework"
+GSHEET_CREDS = "finashkadzbot-d8415e20cc18.json"
 
 # SMTP (настрой под себя!)
 SMTP_SERVER = "smtp.gmail.com"
@@ -47,7 +47,7 @@ START_KEYBOARD = InlineKeyboardMarkup(
 # -------------------- Утилиты --------------------
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
-    for p in [USERS_FILE, HOMEWORK_FILE, VALID_EMAILS_FILE]:
+    for p in [USERS_FILE, HOMEWORK_FILE, VALID_EMAILS_FILE, BLACK_LIST]:  # ← добавили BLACK_LIST
         if not os.path.exists(p):
             with open(p, "w", encoding="utf-8") as f:
                 json.dump({}, f, ensure_ascii=False, indent=4)
@@ -83,12 +83,9 @@ def append_homework_to_sheet(group: str, subject: str, deadline: str, task: str,
     try:
         ws = sheet.worksheet(group_name)
     except gspread.exceptions.WorksheetNotFound:
-        # создаём новую вкладку с именем группы
         ws = sheet.add_worksheet(title=group_name, rows="100", cols="10")
-        # добавляем заголовки для удобства
         ws.append_row(["subject", "deadline", "task", "attachment"])
 
-    # добавляем саму домашку
     ws.append_row([subject, deadline, task, attachment])
 
 def get_homework_from_sheet(group: str):
@@ -105,7 +102,6 @@ def get_homework_from_sheet(group: str):
         raise Exception(f"В Google Таблице нет вкладки для группы {group_name}")
     except Exception as e:
         raise Exception(f"Ошибка при чтении Google Sheets: {e}")
-
 
 # -------------------- Email --------------------
 def send_email_code(email: str, code: str):
@@ -223,39 +219,78 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         valid_emails = load_json(VALID_EMAILS_FILE)
         black_list = load_json(BLACK_LIST)
-        if email in valid_emails and email not in black_list:
-            # уже подтвержден
+
+        # Если в бане — сообщение и выходим
+        if email in black_list:
+            await update.message.reply_animation(
+                animation="https://i.pinimg.com/originals/5c/81/de/5c81de8be60ed702e94a5fffc682db51.gif",
+                caption="Вы были забанены за нарушение правил сообщества!"
+            )
+            return
+
+        entry = valid_emails.get(email)
+
+        # --- Новый формат: {"telegram_id": 12345, "verified_at": "..."} ---
+        if isinstance(entry, dict) and "telegram_id" in entry:
+            if entry["telegram_id"] == uid:
+                # владелец совпадает — пускаем дальше, как подтверждённого
+                context.user_data["email"] = email
+                context.user_data["telegram_id"] = uid
+                context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                await msg.reply_text("Введите номер группы (например, БИ25-1):")
+                context.user_data["hw_action"] = "upload_group"
+            else:
+                # владелец другой
+                await msg.reply_text(
+                    "❌ По нашим данным эта почта принадлежит другому человеку. "
+                    "Проверьте, не совершили ли вы ошибку при вводе и попробуйте заново."
+                )
+                # остаёмся в состоянии upload_email
+            return
+
+        # --- Старый формат: True — миграция в новый формат на текущего пользователя ---
+        if entry is True:
+            valid_emails[email] = {
+                "telegram_id": uid,
+                "verified_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            save_json(VALID_EMAILS_FILE, valid_emails)
+
             context.user_data["email"] = email
             context.user_data["telegram_id"] = uid
             context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             await msg.reply_text("Введите номер группы (например, БИ25-1):")
             context.user_data["hw_action"] = "upload_group"
-        elif email not in valid_emails and email not in black_list:
-            code = str(random.randint(100000, 999999))
-            context.user_data["pending_email"] = email
-            context.user_data["pending_code"] = code
-            try:
-                send_email_code(email, code)
-                await msg.reply_text("Введите код, отправленный на вашу почту. Это потребуется сделать один раз ради безопасности всех пользователей.")
-                context.user_data["hw_action"] = "verify_code"
-            except Exception as e:
-                await msg.reply_text(f"⚠️ Не удалось отправить письмо: {e}")
-        elif email in black_list:
-            await update.message.reply_animation(
-                animation="https://i.pinimg.com/originals/5c/81/de/5c81de8be60ed702e94a5fffc682db51.gif",
-                caption="Вы были забанены за нарушение правил сообщества!"
+            return
+
+        # --- Нет записи — запускаем отправку кода ---
+        code = str(random.randint(100000, 999999))
+        context.user_data["pending_email"] = email
+        context.user_data["pending_code"] = code
+        try:
+            send_email_code(email, code)
+            await msg.reply_text(
+                "Введите код, отправленный на вашу почту. "
+                "Это потребуется сделать один раз ради безопасности всех пользователей."
             )
+            context.user_data["hw_action"] = "verify_code"
+        except Exception as e:
+            await msg.reply_text(f"⚠️ Не удалось отправить письмо: {e}")
         return
 
     if action == "verify_code":
         if text == context.user_data.get("pending_code"):
             email = context.user_data["pending_email"]
             valid_emails = load_json(VALID_EMAILS_FILE)
-            valid_emails[email] = True
+            # Сохраняем новый формат: email -> {telegram_id, verified_at}
+            valid_emails[email] = {
+                "telegram_id": msg.from_user.id,
+                "verified_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
             save_json(VALID_EMAILS_FILE, valid_emails)
 
             context.user_data["email"] = email
-            context.user_data["telegram_id"] = uid
+            context.user_data["telegram_id"] = msg.from_user.id
             context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             await msg.reply_text("✅ Почта подтверждена!\nВведите номер группы (например, БИ25-1):")
@@ -346,7 +381,6 @@ async def send_homework_for_date(update, context, group: str, date_str: str):
         try:
             homework_list = get_homework_from_sheet(group) or []
         except Exception:
-            # если вкладки нет или ошибка в гугл-таблице — просто тихо выходим
             return
 
         def _normalize_deadline(dl):
@@ -418,7 +452,7 @@ async def send_homework_for_date(update, context, group: str, date_str: str):
                 todays_hw.append(hw)
 
         if not todays_hw:
-            return  # ничего не отправляем
+            return
 
         text_lines = [f"🧩 <b>Домашняя работа на {date_str}:</b>"]
         for hw in todays_hw:
@@ -433,6 +467,5 @@ async def send_homework_for_date(update, context, group: str, date_str: str):
         text = "\n".join(text_lines)
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode="HTML")
 
-    except Exception as e:
-        # ничего не отправляем пользователю
+    except Exception:
         return
