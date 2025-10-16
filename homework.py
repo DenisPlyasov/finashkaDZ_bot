@@ -1,35 +1,49 @@
-# homework.py (с верификацией email через код)
+# homework.py (версия с SQLite и ежедневным бэкапом в Google Sheets)
 import os
 import json
 import random
 import smtplib
+import sqlite3
 from email.mime.text import MIMEText
-from datetime import datetime
-
+from datetime import datetime, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+import re
 
 # -------------------- Конфигурация --------------------
 DATA_DIR = "data"
-USERS_FILE = os.path.join(DATA_DIR, "users.json")
-HOMEWORK_FILE = os.path.join(DATA_DIR, "homework.json")
-VALID_EMAILS_FILE = os.path.join(DATA_DIR, "valid_emails.json")
-BLACK_LIST = os.path.join(DATA_DIR, "black_list.json")
-
-# Google Sheets
-SCOPE = ["https://spreadsheets.google.com/feeds",
-         "https://www.googleapis.com/auth/drive"]
-GSHEET_NAME = "homework"                       
-GSHEET_CREDS = "finashkadzbot-d8415e20cc18.json"  
-
-# SMTP (настрой под себя!)
+DB_PATH = os.path.join(DATA_DIR, "homework.db")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-SMTP_USER = "finashkadzbot@gmail.com"       # заменишь на свой email
-SMTP_PASSWORD = open('password_mail.txt').readline()      # app password для SMTP
+SMTP_USER = "finashkadzbot@gmail.com"
+SMTP_PASSWORD = open("password_mail.txt").readline().strip()
 
+# Google Sheets (только для ежедневного бэкапа)
+SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+GSHEET_NAME = "homework_backup"
+GSHEET_CREDS = "finashkadzbot-d8415e20cc18.json"
+import sqlite3
+
+DB_PATH = "data/homework.db"  # путь к твоей базе (можно скорректировать при необходимости)
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # Создаём таблицу homework, если она не существует
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS homework (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        deadline TEXT NOT NULL,
+        task TEXT NOT NULL,
+        attachment TEXT
+    )
+    """)
+    conn.commit()
+    conn.close()
 # Главное меню
 START_TEXT = (
     "Привет! 👋\n"
@@ -45,68 +59,115 @@ START_KEYBOARD = InlineKeyboardMarkup(
     ]]
 )
 
-# -------------------- Утилиты --------------------
-def ensure_dirs():
+# -------------------- SQLite --------------------
+def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
-    for p in [USERS_FILE, HOMEWORK_FILE, VALID_EMAILS_FILE]:
-        if not os.path.exists(p):
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump({}, f, ensure_ascii=False, indent=4)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # Таблицы
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id INTEGER PRIMARY KEY,
+            email TEXT,
+            group_name TEXT,
+            created_at TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS homework (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER,
+            email TEXT,
+            group_name TEXT,
+            subject TEXT,
+            deadline TEXT,
+            task TEXT,
+            attachment TEXT,
+            created_at TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS valid_emails (
+            email TEXT PRIMARY KEY,
+            telegram_id INTEGER,
+            verified_at TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS blacklist (
+            email TEXT PRIMARY KEY
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-def load_json(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def add_homework(entry):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO homework (telegram_id, email, group_name, subject, deadline, task, attachment, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        entry["telegram_id"],
+        entry["email"],
+        entry["group"],
+        entry["subject"],
+        entry["deadline"],
+        entry["task"],
+        entry["attachment"],
+        entry["created_at"]
+    ))
+    conn.commit()
+    conn.close()
 
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+def get_homework_by_group(group_name):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT subject, deadline, task, attachment FROM homework WHERE group_name = ?", (group_name,))
+    rows = c.fetchall()
+    conn.close()
+    records = [{"subject": r[0], "deadline": r[1], "task": r[2], "attachment": r[3]} for r in rows]
+    return records
 
-# -------------------- Google Sheets --------------------
+def get_homework_by_date(group_name, date_str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT subject, deadline, task, attachment FROM homework WHERE group_name = ? AND deadline = ?", (group_name, date_str))
+    rows = c.fetchall()
+    conn.close()
+    records = [{"subject": r[0], "deadline": r[1], "task": r[2], "attachment": r[3]} for r in rows]
+    return records
+
+# -------------------- Google Sheets Backup --------------------
 def connect_gsheet():
     creds = ServiceAccountCredentials.from_json_keyfile_name(GSHEET_CREDS, SCOPE)
     client = gspread.authorize(creds)
     return client.open(GSHEET_NAME)
 
-# -------------------- Google Sheets --------------------
-def connect_gsheet():
-    creds = ServiceAccountCredentials.from_json_keyfile_name(GSHEET_CREDS, SCOPE)
-    client = gspread.authorize(creds)
-    return client.open(GSHEET_NAME)
+def backup_to_gsheet():
+    """Создаёт ежедневный бэкап в Google Sheets (одна вкладка на каждую группу)."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT group_name, subject, deadline, task, attachment FROM homework")
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return
 
-def append_homework_to_sheet(group: str, subject: str, deadline: str, task: str, attachment: str):
-    """
-    Добавляет домашку в Google Sheets.
-    Если вкладка с названием группы не существует — создаёт её и добавляет заголовки.
-    """
     sheet = connect_gsheet()
-    group_name = group.strip()
+    grouped = {}
+    for g, subj, dl, task, att in rows:
+        grouped.setdefault(g, []).append([subj, dl, task, att])
 
-    try:
-        ws = sheet.worksheet(group_name)
-    except gspread.exceptions.WorksheetNotFound:
-        # создаём новую вкладку с именем группы
-        ws = sheet.add_worksheet(title=group_name, rows="100", cols="10")
-        # добавляем заголовки для удобства
+    for group, records in grouped.items():
+        try:
+            ws = sheet.worksheet(group)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sheet.add_worksheet(title=group, rows="100", cols="10")
+            ws.append_row(["subject", "deadline", "task", "attachment"])
+        ws.clear()
         ws.append_row(["subject", "deadline", "task", "attachment"])
-
-    # добавляем саму домашку
-    ws.append_row([subject, deadline, task, attachment])
-
-def get_homework_from_sheet(group: str):
-    """
-    Получает домашку из указанной вкладки.
-    """
-    sheet = connect_gsheet()
-    group_name = group.strip()
-    try:
-        ws = sheet.worksheet(group_name)
-        records = ws.get_all_records()
-        return records
-    except gspread.exceptions.WorksheetNotFound:
-        raise Exception(f"В Google Таблице нет вкладки для группы {group_name}")
-    except Exception as e:
-        raise Exception(f"Ошибка при чтении Google Sheets: {e}")
-
+        ws.append_rows(records)
 
 # -------------------- Email --------------------
 def send_email_code(email: str, code: str):
@@ -114,7 +175,6 @@ def send_email_code(email: str, code: str):
     msg["Subject"] = "Код подтверждения для бота"
     msg["From"] = SMTP_USER
     msg["To"] = email
-
     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
         server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
@@ -122,14 +182,11 @@ def send_email_code(email: str, code: str):
 
 # -------------------- Главное меню --------------------
 async def homework_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [
-            InlineKeyboardButton("Посмотреть", callback_data="hw_view"),
-            InlineKeyboardButton("Загрузить", callback_data="hw_upload"),
-        ]
-    ]
+    keyboard = [[
+        InlineKeyboardButton("Посмотреть", callback_data="hw_view"),
+        InlineKeyboardButton("Загрузить", callback_data="hw_upload"),
+    ]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     if update.callback_query:
         await update.callback_query.edit_message_text(
             "📚 Вы хотите посмотреть домашнюю работу или загрузить?",
@@ -151,68 +208,49 @@ async def homework_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Введите номер группы (например, БИ25-1):")
         context.user_data["hw_action"] = "view_group"
         return
-
-    if data == "hw_upload":
+    if data in ["hw_upload", "hw_add"]:
         await query.edit_message_text("Введите вашу корпоративную почту:")
         context.user_data["hw_action"] = "upload_email"
         return
-
     if data == "hw_to_menu":
         await query.edit_message_text(START_TEXT, reply_markup=START_KEYBOARD)
         context.user_data.clear()
         return
 
-    if data == "hw_add":
-        await query.edit_message_text("Введите вашу корпоративную почту:")
-        context.user_data["hw_action"] = "upload_email"
-        return
-
 # -------------------- Обработчик сообщений --------------------
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ensure_dirs()
+    init_db()
     msg = update.message
     if msg is None:
         return
     text = (msg.text or "").strip()
     uid = msg.from_user.id
+    action = context.user_data.get("hw_action")
 
-    if "hw_action" not in context.user_data:
+    if not action:
         return
-    action = context.user_data["hw_action"]
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
 
     # ---- Просмотр ----
     if action == "view_group":
         group = text
-        try:
-            records = get_homework_from_sheet(group)
-            if not records:
-                kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("Добавить ДЗ", callback_data="hw_add"),
-                    InlineKeyboardButton("В меню", callback_data="hw_to_menu")
-                ]])
-                await msg.reply_text("❌ В этой группе пока нет домашки.", reply_markup=kb)
-            else:
-                out = f"📖 Домашка для *{group}:*\n\n"
-                for r_idx, r in enumerate(records, start=1):
-                    subj = r.get("subject", "-")
-                    dl = r.get("deadline", "-")
-                    task = r.get("task", "-")
-                    att = r.get("attachment", "-")
-                    out += (
-                        f"#{r_idx}\n"
-                        f"📘 *{subj}*\n"
-                        f"📅 Дедлайн: {dl}\n"
-                        f"✏️ {task}\n"
-                        f"📎 {att}\n\n"
-                    )
-                kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("Добавить ДЗ", callback_data="hw_add"),
-                    InlineKeyboardButton("В меню", callback_data="hw_to_menu")
-                ]])
-                await msg.reply_text(out, parse_mode="Markdown", reply_markup=kb)
-        except Exception as e:
-            await msg.reply_text(f"⚠️ Ошибка: {e}")
+        records = get_homework_by_group(group)
+        if not records:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Добавить ДЗ", callback_data="hw_add"),
+                                        InlineKeyboardButton("В меню", callback_data="hw_to_menu")]])
+            await msg.reply_text("❌ В этой группе пока нет домашки.", reply_markup=kb)
+        else:
+            out = f"📖 Домашка для *{group}:*\n\n"
+            for r_idx, r in enumerate(records, start=1):
+                out += (f"#{r_idx}\n📘 *{r['subject']}*\n📅 Дедлайн: {r['deadline']}\n"
+                        f"✏️ {r['task']}\n📎 {r['attachment']}\n\n")
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Добавить ДЗ", callback_data="hw_add"),
+                                        InlineKeyboardButton("В меню", callback_data="hw_to_menu")]])
+            await msg.reply_text(out, parse_mode="Markdown", reply_markup=kb)
         context.user_data.clear()
+        conn.close()
         return
 
     # ---- Верификация email ----
@@ -220,64 +258,66 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         email = text
         if not email.endswith("@edu.fa.ru"):
             await msg.reply_text("❌ Разрешены только адреса на @edu.fa.ru")
+            conn.close()
             return
 
-        valid_emails = load_json(VALID_EMAILS_FILE)
-        black_list = load_json(BLACK_LIST)
-        if email in valid_emails and email not in black_list:
-            # уже подтвержден
-            context.user_data["email"] = email
-            context.user_data["telegram_id"] = uid
-            context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            await msg.reply_text("Введите номер группы (например, БИ25-1):")
-            context.user_data["hw_action"] = "upload_group"
-        elif email not in valid_emails and email not in black_list:
-            code = str(random.randint(100000, 999999))
-            context.user_data["pending_email"] = email
-            context.user_data["pending_code"] = code
-            try:
-                send_email_code(email, code)
-                await msg.reply_text("Введите код, отправленный на вашу почту. Это потребуется сделать один раз ради безопасности всех пользователей.")
-                context.user_data["hw_action"] = "verify_code"
-            except Exception as e:
-                await msg.reply_text(f"⚠️ Не удалось отправить письмо: {e}")
-        elif email in black_list:
-            await update.message.reply_animation(
+        c.execute("SELECT email FROM blacklist WHERE email = ?", (email,))
+        if c.fetchone():
+            await msg.reply_animation(
                 animation="https://i.pinimg.com/originals/5c/81/de/5c81de8be60ed702e94a5fffc682db51.gif",
                 caption="Вы были забанены за нарушение правил сообщества!"
             )
+            conn.close()
+            return
+
+        c.execute("SELECT telegram_id FROM valid_emails WHERE email = ?", (email,))
+        row = c.fetchone()
+        if row:
+            if row[0] == uid:
+                context.user_data.update(email=email, telegram_id=uid,
+                                         created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                await msg.reply_text("Введите номер группы (например, БИ25-1):")
+                context.user_data["hw_action"] = "upload_group"
+            else:
+                await msg.reply_text("❌ Эта почта уже привязана к другому пользователю.")
+            conn.close()
+            return
+
+        code = str(random.randint(100000, 999999))
+        context.user_data.update(pending_email=email, pending_code=code)
+        try:
+            send_email_code(email, code)
+            await msg.reply_text("Введите код, отправленный на вашу почту.")
+            context.user_data["hw_action"] = "verify_code"
+        except Exception as e:
+            await msg.reply_text(f"⚠️ Не удалось отправить письмо: {e}")
+        conn.close()
         return
 
     if action == "verify_code":
         if text == context.user_data.get("pending_code"):
             email = context.user_data["pending_email"]
-            valid_emails = load_json(VALID_EMAILS_FILE)
-            valid_emails[email] = True
-            save_json(VALID_EMAILS_FILE, valid_emails)
-
-            context.user_data["email"] = email
-            context.user_data["telegram_id"] = uid
-            context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+            c.execute("INSERT OR REPLACE INTO valid_emails VALUES (?, ?, ?)",
+                      (email, uid, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+            context.user_data.update(email=email, telegram_id=uid,
+                                     created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             await msg.reply_text("✅ Почта подтверждена!\nВведите номер группы (например, БИ25-1):")
             context.user_data["hw_action"] = "upload_group"
         else:
             await msg.reply_text("❌ Неверный код. Попробуйте снова.")
+        conn.close()
         return
 
     # ---- Добавление ДЗ ----
     if action == "upload_group":
         context.user_data["group"] = text
-        users = load_json(USERS_FILE)
-        users[str(uid)] = {
-            "email": context.user_data["email"],
-            "group": text,
-            "telegram_id": uid,
-            "created_at": context.user_data["created_at"]
-        }
-        save_json(USERS_FILE, users)
+        c.execute("INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?)",
+                  (uid, context.user_data["email"], text, context.user_data["created_at"]))
+        conn.commit()
         await msg.reply_text("📘 По какому предмету домашка?")
         context.user_data["hw_action"] = "upload_subject"
+        conn.close()
         return
 
     if action == "upload_subject":
@@ -302,11 +342,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attachment = text if text.lower() != "нет" else "-"
         context.user_data["attachment"] = attachment
 
-        hw_data = load_json(HOMEWORK_FILE)
-        new_id = str(len(hw_data) + 1)
         entry = {
-            "id": new_id,
-            "user_id": context.user_data["telegram_id"],
+            "telegram_id": uid,
             "email": context.user_data["email"],
             "group": context.user_data["group"],
             "subject": context.user_data["subject"],
@@ -315,24 +352,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "attachment": attachment,
             "created_at": context.user_data["created_at"]
         }
-        hw_data[new_id] = entry
-        save_json(HOMEWORK_FILE, hw_data)
 
-        try:
-            append_homework_to_sheet(
-                entry["group"], entry["subject"], entry["deadline"],
-                entry["task"], entry["attachment"]
-            )
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("Добавить ДЗ", callback_data="hw_add"),
-                InlineKeyboardButton("В меню", callback_data="hw_to_menu")
-            ]])
-            await msg.reply_text(
-                "✅ Домашка успешно добавлена в Google Sheets и сохранена локально!",
-                reply_markup=kb
-            )
-        except Exception as e:
-            await msg.reply_text(f"⚠️ Локально сохранено, но не удалось записать в Google Sheets: {e}")
+        add_homework(entry)
 
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Добавить ДЗ", callback_data="hw_add"),
+                                    InlineKeyboardButton("В меню", callback_data="hw_to_menu")]])
+        await msg.reply_text("✅ Домашка успешно добавлена и сохранена в базе!", reply_markup=kb)
         context.user_data.clear()
         return
+
+# -------------------- Домашка по дате --------------------
+async def send_homework_for_date(update, context, group: str, date_str: str):
+    records = get_homework_by_date(group, date_str)
+    if not records:
+        return
+    text_lines = [f"🧩 <b>Домашняя работа на {date_str}:</b>"]
+    for hw in records:
+        text_lines.append(f"📘 <b>{hw['subject']}</b>: {hw['task']} (до {hw['deadline']})")
+        if hw["attachment"] and hw["attachment"] != "-":
+            text_lines.append(f"📎 {hw['attachment']}")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="\n".join(text_lines), parse_mode="HTML")

@@ -7,13 +7,15 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler, Defaults
 )
-
+from schedule_groups import build_schedule_groups_conv, start as groups_start
 from schedule import schedule_menu, schedule_callback
-from mail_check import mail_entry
 import teachers_schedule as TS  # модуль с логикой преподавателей
 from homework import * 
-from homework import homework_menu, homework_callback, message_handler
-
+from mail_check import add_mail_handlers, mail_checker_task, start_mail
+import asyncio
+from telegram.ext import Application, JobQueue
+from homework import backup_to_gsheet
+from datetime import time
 # ===== ЛОГГЕРЫ =====
 logging.basicConfig(
     level=logging.WARNING,
@@ -42,7 +44,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "schedule":
         await schedule_menu(update, context)
     elif q.data == "mail":
-        await mail_entry(update, context)
+        await start_mail(update, context)
     elif q.data == "homework":
         await homework_menu(update, context)
     elif q.data.startswith("hw_"):
@@ -87,16 +89,69 @@ def main():
         .defaults(Defaults(parse_mode=ParseMode.HTML))
         .build()
     )
+    if app.job_queue is None:
+        jq = JobQueue()
+        jq.set_application(app)
+        app.job_queue = jq
+    # 0) Диалог расписаний ГРУПП — ДОЛЖЕН идти первым
+    from schedule_groups import build_schedule_groups_conv, start as groups_start
 
+# вставить/заменить в mail_check.py
+
+    def add_mail_handlers(application):
+        """Register mail handlers in the bot application."""
+        from main import start  # используется для возврата в меню
+
+        conv_handler = ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(start_mail, pattern=r"^mail$"),
+                # можно добавить команду /mail на всякий случай
+                # CommandHandler("mail", lambda u,c: start_mail(u,c))
+            ],
+            states={
+                MAIL_SELECT_ACCOUNT: [
+                    CallbackQueryHandler(mail_select_callback, pattern=r"^(mail_add|mail_select:\d+|to_menu)$")
+                ],
+                MAIL_ENTER_EMAIL: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, mail_text_handler)
+                ],
+                MAIL_ENTER_PASSWORD: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, mail_text_handler)
+                ],
+            },
+            fallbacks=[
+                CallbackQueryHandler(mail_select_callback, pattern=r"^to_menu$")
+            ],
+            name="mail_conv",
+            persistent=False,
+            # важно: отслеживаем разговор по чату, а не по сообщению
+            per_message=False,
+        )
+
+        application.add_handler(conv_handler)
+
+
+    schedule_conv = build_schedule_groups_conv(
+        entry_points=[
+            CallbackQueryHandler(groups_start, pattern=r"^schedule_groups$"),
+            CommandHandler("schedule", groups_start),
+        ]
+    )
+    app.add_handler(schedule_conv)
+
+    # 1) Команда старт
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(schedule|homework|mail)$"))
 
-    app.add_handler(CallbackQueryHandler(homework_callback, pattern="^hw_"))
+    # 2) Главные кнопки верхнего уровня (убрал "mail" из паттерна)
+    app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(schedule|homework)$"))
 
-    # Внутри меню расписания: «Расписание» и «Избранное»
-    app.add_handler(CallbackQueryHandler(schedule_callback, pattern=r"^(schedule_groups|select_group)$"))
+    # 3) Домашняя работа (специфичный обработчик hw_)
+    app.add_handler(CallbackQueryHandler(homework_callback, pattern=r"^hw_"))
 
-# Диалог расписания преподавателя (вход — кнопка «Преподаватель» или команда)
+    # 4) Меню расписания (конкретный паттерн, чтобы не перехватывать другие)
+    app.add_handler(CallbackQueryHandler(schedule_callback, pattern=r"^select_group$"))
+
+    # 5) Диалог расписания преподавателей
     teacher_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(start_teacher_from_menu, pattern=r"^teachers_schedule$"),
@@ -111,38 +166,39 @@ def main():
         fallbacks=[CommandHandler("teacher_schedule", TS.cmd_start)],
         name="timetable_conv",
         persistent=False,
-        # ВАЖНО: per_message должен быть False, т.к. есть MessageHandler
         per_message=False,
     )
     app.add_handler(teacher_conv)
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.add_error_handler(on_error)
+    init_db()  # создаёт таблицу, если её нет
+    # 6) Регистрация обработчиков почты — ДОЛЖНА быть ДО общего ловца колбэков
+    from mail_check import add_mail_handlers, mail_checker_task
+    add_mail_handlers(app)
 
-
-
-
-    # 1. Команда старт
-    app.add_handler(CommandHandler("start", start))
-
-    # 2. Главные кнопки верхнего уровня
-    app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(schedule|homework|mail)$"))
-
-    # 3. Домашняя работа
-    app.add_handler(CallbackQueryHandler(homework_callback, pattern=r"^hw_"))
-
-    # 6. Общий button_handler для остальных колбэков
+    # 7) Общий колбэк (ловит прочие callback_data) — оставляем его в конце
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # 7. Текстовые сообщения
+    # 8) Текстовые сообщения (общие)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    # 8. Ошибки
+    # 9) Ошибки
     app.add_error_handler(on_error)
 
+    # 10) Фоновая проверка почты (JobQueue должен быть корректно инициализирован)
+    app.job_queue.run_repeating(mail_checker_task, interval=60, first=5)
 
+    # Планировщик бэкапа в 03:00 по серверному времени
+    async def scheduled_backup(context):
+        try:
+            backup_to_gsheet()
+            print("[✅] Daily Google Sheets backup completed.")
+        except Exception as e:
+            print(f"[⚠️] Backup failed: {e}")
 
-
+    app.job_queue.run_daily(
+        scheduled_backup,
+        time=time(3, 0, 0),   # каждый день в 03:00 ночи
+        name="daily_backup"
+    )
     print("✅ Бот запущен (polling)…")
     # НИЧЕГО асинхронно не вызываем ДО run_polling — никаких asyncio.run!
     app.run_polling(
