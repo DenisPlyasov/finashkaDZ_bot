@@ -1,6 +1,6 @@
 import os
 import logging
-from mail_check import add_mail_handlers
+from telegram.request import HTTPXRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -10,8 +10,7 @@ from telegram.ext import (
 from schedule_groups import build_schedule_groups_conv, start as groups_start
 from schedule import schedule_menu, schedule_callback
 import teachers_schedule as TS  # модуль с логикой преподавателей
-from homework import * 
-from homework import homework_menu, homework_callback, message_handler
+from homework import *
 from mail_check import add_mail_handlers, mail_checker_task, start_mail
 import asyncio
 from telegram.ext import Application, JobQueue
@@ -25,7 +24,8 @@ log = logging.getLogger("finashka-bot")
 WELCOME_TEXT = (
     "Привет! 👋\n"
     "Я — помощник студентов твоего университета. "
-    "Могу напоминать о парах, хранить расписание и помогать с домашкой.\n\n"
+    "Могу напоминать о парах и дз, хранить расписание и показывать дз других групп.\n"
+    "Мы только запустили бета тест, поэтому если будут какие-то ошибки или предложения пишите: @crop_uhar\n\n"
     "Выбери одну из опций ниже:"
 )
 
@@ -82,9 +82,17 @@ def main():
     for var in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy"):
         os.environ.pop(var, None)
 
+    request = HTTPXRequest(
+        read_timeout=30.0,  # ожидание ответа
+        write_timeout=30.0,  # отправка тела
+        connect_timeout=30.0,  # соединение
+        pool_timeout=30.0,  # ожидание свободного соединения
+    )
+
     app = (
         ApplicationBuilder()
         .token(token_value)
+        .request(request)  # <-- ВАЖНО
         .defaults(Defaults(parse_mode=ParseMode.HTML))
         .build()
     )
@@ -148,7 +156,7 @@ def main():
     app.add_handler(CallbackQueryHandler(homework_callback, pattern=r"^hw_"))
 
     # 4) Меню расписания (конкретный паттерн, чтобы не перехватывать другие)
-    app.add_handler(CallbackQueryHandler(schedule_callback, pattern=r"^select_group$"))
+    #app.add_handler(CallbackQueryHandler(schedule_callback, pattern=r"^select_group$"))
 
     # 5) Диалог расписания преподавателей
     teacher_conv = ConversationHandler(
@@ -174,10 +182,11 @@ def main():
     add_mail_handlers(app)
 
     # 7) Общий колбэк (ловит прочие callback_data) — оставляем его в конце
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(schedule|homework|mail|hw_.*)$"))
 
     # 8) Текстовые сообщения (общие)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
 
     # 9) Ошибки
     app.add_error_handler(on_error)

@@ -127,12 +127,12 @@ async def homework_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.callback_query:
         await update.callback_query.edit_message_text(
-            "📚 Вы хотите посмотреть домашнюю работу или загрузить?",
+            "1️⃣ Здесь вы можете или посмотреть дз, какой-то группы или добавить дз в свою группу",
             reply_markup=reply_markup
         )
     else:
         await update.message.reply_text(
-            "📚 Вы хотите посмотреть домашнюю работу или загрузить?",
+            "1️⃣ Здесь вы можете или посмотреть дз, какой-то группы или добавить дз в свою группу",
             reply_markup=reply_markup
         )
 
@@ -143,12 +143,12 @@ async def homework_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "hw_view":
-        await query.edit_message_text("Введите номер группы (например, БИ25-1):")
+        await query.edit_message_text("3️⃣ Введите номер вашей группы (например, ПИ19-6):")
         context.user_data["hw_action"] = "view_group"
         return
 
     if data == "hw_upload":
-        await query.edit_message_text("Введите вашу корпоративную почту:")
+        await query.edit_message_text("2️⃣ Введите вашу корпоративную почту, это нужно для вашей верификации и защиты от спама")
         context.user_data["hw_action"] = "upload_email"
         return
 
@@ -158,7 +158,7 @@ async def homework_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "hw_add":
-        await query.edit_message_text("Введите вашу корпоративную почту:")
+        await query.edit_message_text("2️⃣ Введите вашу корпоративную почту, это нужно для вашей верификации и защиты от спама")
         context.user_data["hw_action"] = "upload_email"
         return
 
@@ -237,7 +237,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["email"] = email
                 context.user_data["telegram_id"] = uid
                 context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                await msg.reply_text("Введите номер группы (например, БИ25-1):")
+                await msg.reply_text("3️⃣ Введите номер вашей группы (например, ПИ19-6):")
                 context.user_data["hw_action"] = "upload_group"
             else:
                 # владелец другой
@@ -259,7 +259,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["email"] = email
             context.user_data["telegram_id"] = uid
             context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            await msg.reply_text("Введите номер группы (например, БИ25-1):")
+            await msg.reply_text("3️⃣ Введите номер вашей группы (например, ПИ19-6):")
             context.user_data["hw_action"] = "upload_group"
             return
 
@@ -270,8 +270,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             send_email_code(email, code)
             await msg.reply_text(
-                "Введите код, отправленный на вашу почту. "
-                "Это потребуется сделать один раз ради безопасности всех пользователей."
+                "Для верификации осталось совсем чучуть, введите код, отправленный на вашу почту. "
             )
             context.user_data["hw_action"] = "verify_code"
         except Exception as e:
@@ -293,7 +292,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["telegram_id"] = msg.from_user.id
             context.user_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            await msg.reply_text("✅ Почта подтверждена!\nВведите номер группы (например, БИ25-1):")
+            await msg.reply_text("✅ Почта подтверждена!\n3️⃣ Введите номер вашей группы (например, ПИ19-6):")
             context.user_data["hw_action"] = "upload_group"
         else:
             await msg.reply_text("❌ Неверный код. Попробуйте снова.")
@@ -362,11 +361,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("В меню", callback_data="hw_to_menu")
             ]])
             await msg.reply_text(
-                "✅ Домашка успешно добавлена в Google Sheets и сохранена локально!",
+                "✅ Домашка успешно добавлена теперь каждый может ее увидеть",
                 reply_markup=kb
             )
         except Exception as e:
-            await msg.reply_text(f"⚠️ Локально сохранено, но не удалось записать в Google Sheets: {e}")
+            await msg.reply_text(f"⚠️ Не удалось сохранить: {e}")
 
         context.user_data.clear()
         return

@@ -95,7 +95,7 @@ async def start_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIL_SELECT_ACCOUNT
     else:
         context.user_data["mail_state"] = MAIL_ENTER_EMAIL
-        await query.edit_message_text("📧 Введите корпоративный email:")
+        await query.edit_message_text("1️⃣ Введите корпоративный email:")
         return MAIL_ENTER_EMAIL
 
 async def mail_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,9 +107,10 @@ async def mail_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["mail_email"] = text
         context.user_data["mail_state"] = MAIL_ENTER_PASSWORD
         await update.message.reply_text(
-            "🔑 Введите пароль приложения от почты.\n"
+            "2️⃣ Введите пароль приложения от почты.\n"
+            "Это нужно для защиты вашей почты от пранкеров и тд\n"
             "Если у вас нет пароля приложения, создайте его по инструкции:\n"
-            "👉 https://telegra.ph"
+            "👉 https://telegra.ph/Kak-sozdat-parol-prilozheniya-dlya-pochty-10-16"
         )
         return MAIL_ENTER_PASSWORD
 
