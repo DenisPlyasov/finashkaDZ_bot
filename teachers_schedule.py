@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict
 import re
-from main1 import *
+from main import *
 from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -15,7 +15,8 @@ from fa_api import FaAPI
 WELCOME_TEXT_MAIN = (
     "Привет! 👋\n"
     "Я — помощник студентов твоего университета. "
-    "Могу напоминать о парах, хранить расписание и помогать с домашкой.\n\n"
+    "Могу напоминать о парах и дз, хранить расписание и показывать дз других групп.\n"
+    "Мы только запустили бета тест, поэтому если будут какие-то ошибки или предложения пишите: @question_finashkadzbot\n\n"
     "Выбери одну из опций ниже:"
 )
 
@@ -199,7 +200,7 @@ def _is_source_down(exc: Exception) -> bool:
 # ====== Хендлеры ======
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "2️⃣ Введите <b>фамилию преподавателя</b> \n" "(Например: <i>Неизвестный</i>):",
+        "⚠️ P.s. После 23:00 бот будет работать медленне, проблема на нашей стороне.\n\n2️⃣ Введите <b>фамилию преподавателя</b> \n" "(Например: <i>Неизвестный</i>): ",
         parse_mode=ParseMode.HTML
     )
     return ASK_TEACHER
@@ -388,7 +389,7 @@ async def on_pick_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("teacher_id", None)
         context.user_data.pop("teacher_name", None)
         await q.edit_message_text(
-            "2️⃣ Введите <b>фамилию преподавателя</b>\n(Например: <i>Неизвестный</i>):",
+            "⚠️ P.s. После 23:00 бот будет работать медленне, проблема на нашей стороне.\n\n2️⃣ Введите <b>фамилию преподавателя</b> \n" "(Например: <i>Неизвестный</i>): ",
             parse_mode=ParseMode.HTML
         )
         return ASK_TEACHER
