@@ -4,15 +4,15 @@ from telegram.constants import ParseMode
 
 SCHEDULE_START_TEXT = (
     "1️⃣ *Выберете какое расписание вы хотите посмотреть.*\n"
-    "Здесь вы сможете посмотреть расписание любой группы, расписание преподавателя или же лично ваше, когда добавите его в избранное."
+    "Здесь вы сможете посмотреть расписание любой группы, расписание преподавателя, а так же выбрать расписание уведомления которого будут вам приходить (вместе с расписанием группы приходит и ее дз, если же конечно вы его ввели 😉)."
 )
 
 async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
-            InlineKeyboardButton("Расписание", callback_data="schedule_groups"),
-            InlineKeyboardButton("Преподаватель", callback_data="teachers_schedule"),
-            InlineKeyboardButton("Избранное", callback_data="select_group"),
+            InlineKeyboardButton("📘 Группы", callback_data="schedule_groups"),
+            InlineKeyboardButton("👨‍🏫 Преподаватели", callback_data="teachers_schedule"),
+            InlineKeyboardButton("⚙️ Настройки", callback_data="settings")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)

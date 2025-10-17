@@ -2,7 +2,8 @@ import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict
 import re
-
+from main1 import *
+from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -10,6 +11,20 @@ from telegram.ext import (
     ContextTypes, ConversationHandler, filters
 )
 from fa_api import FaAPI
+
+WELCOME_TEXT_MAIN = (
+    "Привет! 👋\n"
+    "Я — помощник студентов твоего университета. "
+    "Могу напоминать о парах, хранить расписание и помогать с домашкой.\n\n"
+    "Выбери одну из опций ниже:"
+)
+
+def _main_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Расписание", callback_data="schedule"),
+        InlineKeyboardButton("Домашняя работа", callback_data="homework"),
+        InlineKeyboardButton("Почта", callback_data="mail"),
+    ]])
 
 # ====== Константы состояний диалога ======
 ASK_TEACHER, CHOOSE_TEACHER, CHOOSE_RANGE, ASK_CUSTOM_DATE = range(4)
@@ -25,37 +40,34 @@ def _mins(t: str) -> int:
     h, m = map(int, t.split(":"))
     return h*60 + m
 
-
-async def start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Точка входа при нажатии кнопки 'Преподаватель' из меню расписания."""
-    q = update.callback_query
-    if q:
-        await q.answer()
-    return await cmd_start(update, context)
-
-def build_teachers_schedule_conv() -> ConversationHandler:
-    """Возвращает ConversationHandler для сценария расписания преподавателя."""
-    return ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(start_from_menu, pattern=r"^teachers_schedule$"),
-            CommandHandler("teacher_schedule", cmd_start),
-        ],
-        states={
-            ASK_TEACHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_teacher_surname)],
-            CHOOSE_TEACHER: [CallbackQueryHandler(on_pick_teacher, pattern=r"^pick_teacher:")],
-            CHOOSE_RANGE: [CallbackQueryHandler(on_pick_range, pattern=r"^range:")],
-            ASK_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_custom_date)],
-        },
-        fallbacks=[CommandHandler("teacher_schedule", cmd_start)],
-        name="timetable_conv",
-        persistent=False,
-    )
-
-
 def _fmt_day(records: list[dict], teacher_fallback: str = "Преподаватель") -> str:
     if not records:
         return "Занятий не найдено."
 
+    async def start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Точка входа при нажатии кнопки 'Преподаватель' из меню расписания."""
+        q = update.callback_query
+        if q:
+            await q.answer()
+        return await cmd_start(update, context)
+
+    def build_teachers_schedule_conv() -> ConversationHandler:
+        """Возвращает ConversationHandler для сценария расписания преподавателя."""
+        return ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(start_from_menu, pattern=r"^teachers_schedule$"),
+                CommandHandler("teacher_schedule", cmd_start),
+            ],
+            states={
+                ASK_TEACHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_teacher_surname)],
+                CHOOSE_TEACHER: [CallbackQueryHandler(on_pick_teacher, pattern=r"^pick_teacher:")],
+                CHOOSE_RANGE: [CallbackQueryHandler(on_pick_range, pattern=r"^range:")],
+                ASK_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_custom_date)],
+            },
+            fallbacks=[CommandHandler("teacher_schedule", cmd_start)],
+            name="timetable_conv",
+            persistent=False,
+        )
 
     def _val(x):  # None -> ""
         return (x or "").strip()
@@ -338,12 +350,16 @@ async def _ask_range(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: b
             InlineKeyboardButton("На неделю", callback_data="range:this_week"),
             InlineKeyboardButton("На след. неделю", callback_data="range:next_week"),
         ],
-        [InlineKeyboardButton("Выбрать дату…", callback_data="range:pick_date")],
+        [InlineKeyboardButton("Выбрать дату", callback_data="range:pick_date"),
+         InlineKeyboardButton("Сменить преподавателя", callback_data="range:change_teacher"),
+        ],
+        [
+            InlineKeyboardButton("Отмена", callback_data="range:cancel")
+        ],
     ]
-    if edit and update.message:
+    if edit and getattr(update, "message", None):
         await update.message.reply_text("Выберите период:", reply_markup=InlineKeyboardMarkup(kb))
     else:
-        # пришли из callback — шлём новое сообщение
         await update.effective_chat.send_message("Выберите период:", reply_markup=InlineKeyboardMarkup(kb))
     return CHOOSE_RANGE
 
@@ -366,42 +382,65 @@ async def on_pick_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     teacher_id = context.user_data.get("teacher_id")
     teacher_name = context.user_data.get("teacher_name", "Преподаватель")
 
-    if not teacher_id:
-        await q.edit_message_text("Сначала выберите преподавателя командой /start.")
-        return ConversationHandler.END
+    # === смена преподавателя ===
+    if choice == "change_teacher":
+        # очищаем сохранённого преподавателя и просим ввести заново
+        context.user_data.pop("teacher_id", None)
+        context.user_data.pop("teacher_name", None)
+        await q.edit_message_text(
+            "2️⃣ Введите <b>фамилию преподавателя</b>\n(Например: <i>Неизвестный</i>):",
+            parse_mode=ParseMode.HTML
+        )
+        return ASK_TEACHER
 
+    # === сегодня ===
     if choice == "today":
         start = end = datetime.combine(today, datetime.min.time())
         text = await _fetch_and_format(teacher_id, start, end, teacher_name)
         await q.edit_message_text(text, parse_mode=ParseMode.HTML)
-        return ConversationHandler.END
+        # Показать снова меню выбора периода (чтобы не выходить из диалога)
+        await _ask_range(update, context, edit=False)
+        return CHOOSE_RANGE
 
     if choice == "tomorrow":
         d = today + timedelta(days=1)
         start = end = datetime.combine(d, datetime.min.time())
         text = await _fetch_and_format(teacher_id, start, end, teacher_name)
         await q.edit_message_text(text, parse_mode=ParseMode.HTML)
-        return ConversationHandler.END
+        await _ask_range(update, context, edit=False)
+        return CHOOSE_RANGE
 
+    # === эта неделя ===
     if choice == "this_week":
         start, end = _week_bounds(datetime.combine(today, datetime.min.time()))
-        # Сначала уберём клавиатуру/уведомим
-        await q.edit_message_text(
-            f"Расписание на неделю {start.strftime('%d.%m')}–{end.strftime('%d.%m')} — отправляю по дням…"
-        )
+        try:
+            await q.edit_message_text(
+                f"Расписание на неделю {start.strftime('%d.%m')}–{end.strftime('%d.%m')} — отправляю по дням…"
+            )
+        except Exception:
+            pass
         await _send_period_by_days(update.effective_chat, teacher_id, start, end, teacher_name)
-        return ConversationHandler.END
+        # завершающее сообщение с кнопками
+        await _ask_range(update, context, edit=False)
+        return CHOOSE_RANGE
 
+    # === следующая неделя ===
     if choice == "next_week":
         this_mon, this_sun = _week_bounds(datetime.combine(today, datetime.min.time()))
         start = this_mon + timedelta(days=7)
         end = this_sun + timedelta(days=7)
-        await q.edit_message_text(
-            f"Расписание на след. неделю {start.strftime('%d.%m')}–{end.strftime('%d.%m')} — отправляю по дням…"
-        )
+        try:
+            await q.edit_message_text(
+                f"Расписание на след. неделю {start.strftime('%d.%m')}–{end.strftime('%d.%m')} — отправляю по дням…"
+            )
+        except Exception:
+            pass
         await _send_period_by_days(update.effective_chat, teacher_id, start, end, teacher_name)
-        return ConversationHandler.END
+        # завершающее сообщение с кнопками
+        await _ask_range(update, context, edit=False)
+        return CHOOSE_RANGE
 
+    # === выбрать дату ===
     if choice == "pick_date":
         await q.edit_message_text(
             "Введите дату в формате <b>YYYY-MM-DD</b> или <b>DD.MM.YYYY</b>:",
@@ -409,6 +448,30 @@ async def on_pick_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ASK_CUSTOM_DATE
 
+    # === отмена — уже починено раньше ===
+    if choice == "cancel":
+        # вернуть в ГЛАВНОЕ меню (main)
+        try:
+            await q.edit_message_text(
+                WELCOME_TEXT_MAIN,
+                reply_markup=_main_menu_kb(),
+            )
+        except BadRequest:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=WELCOME_TEXT_MAIN,
+                reply_markup=_main_menu_kb(),
+            )
+        return ConversationHandler.END
+
+    return CHOOSE_RANGE
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    if getattr(update, "message", None):
+        await update.message.reply_text(WELCOME_TEXT_MAIN, reply_markup=_main_menu_kb())
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=WELCOME_TEXT_MAIN, reply_markup=_main_menu_kb())
     return ConversationHandler.END
 
 async def on_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -423,7 +486,10 @@ async def on_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start = end = dt
     text = await _fetch_and_format(teacher_id, start, end, teacher_name)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-    return ConversationHandler.END
+
+    # Снова показать клавиатуру выбора периода
+    await _ask_range(update, context, edit=False)
+    return CHOOSE_RANGE
 
 async def _fetch_and_format(teacher_id, start: datetime, end: datetime, teacher_name: str, period: bool = False) -> str:
     try:
@@ -453,7 +519,6 @@ async def _fetch_and_format(teacher_id, start: datetime, end: datetime, teacher_
 
 # ====== Сборка приложения ======
 def main():
-
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
@@ -462,7 +527,7 @@ def main():
             CHOOSE_RANGE: [CallbackQueryHandler(on_pick_range, pattern=r"^range:")],
             ASK_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_custom_date)],
         },
-        fallbacks=[CommandHandler("start", cmd_start)],
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", cmd_start)],
         name="timetable_conv",
         persistent=False
     )
