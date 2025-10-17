@@ -167,7 +167,9 @@ def main():
         states={
             TS.ASK_TEACHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, TS.on_teacher_surname)],
             TS.CHOOSE_TEACHER: [CallbackQueryHandler(TS.on_pick_teacher, pattern=r"^pick_teacher:")],
-            TS.CHOOSE_RANGE: [CallbackQueryHandler(TS.on_pick_range, pattern=r"^range:")],
+            TS.CHOOSE_RANGE: [CallbackQueryHandler(TS.on_pick_range, pattern=r"^range:"),
+                              CallbackQueryHandler(TS.on_pick_range, pattern=r"^fav_teacher:"),
+                              ],
             TS.ASK_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, TS.on_custom_date)],
         },
         fallbacks=[CommandHandler("teacher_schedule", TS.cmd_start)],
