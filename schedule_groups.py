@@ -21,6 +21,9 @@ from telegram.ext import (
 )
 from fa_api import FaAPI  # библиотека расписаний
 
+_RINGS_DEFAULT = ["08:30","10:15","12:00","13:50","15:35","17:20","19:05"]
+
+
 WELCOME_TEXT_MAIN = (
     "Привет! 👋\n"
     "Я — помощник студентов твоего университета. "
@@ -186,6 +189,69 @@ def _get_time_begin(lesson: dict) -> str:
         lesson.get("beginLesson"),
         lesson.get("time_begin"),
     )
+
+# ===== Нумерация пар по звонкам (можно переопределить через rings.json) =====
+import os, json
+
+RING_STARTS = ["08:30", "10:10", "11:50", "14:00", "15:40", "17:25", "18:55", "20:30"] # примерные времена
+
+def _num_emoji(n: int) -> str:
+    """1 -> 1️⃣, 10 -> 🔟, 11 -> 1️⃣1️⃣ и т.д."""
+    key = {0:"0️⃣",1:"1️⃣",2:"2️⃣",3:"3️⃣",4:"4️⃣",5:"5️⃣",6:"6️⃣",7:"7️⃣",8:"8️⃣"}
+    if n in key:
+        return key[n]
+    return "".join(key[int(ch)] if ch.isdigit() else ch for ch in str(n))
+
+def _slot_no_by_time_range(time_range: str) -> Optional[int]:
+    """Возвращает номер пары по времени начала (ближайший к RING_STARTS)."""
+    start_min, _ = _range_to_bounds(time_range)
+    if start_min is None:
+        return None
+    ring_mins = [_hhmm_to_min(x) for x in RING_STARTS if _hhmm_to_min(x) is not None]
+    if not ring_mins:
+        return None
+    idx = min(range(len(ring_mins)), key=lambda k: abs(ring_mins[k] - start_min))
+    return idx + 1
+
+def _load_rings_starts() -> list[str]:
+    """Читает файл rings.json (массив 'HH:MM'), если есть. Иначе — дефолт."""
+    rings_path = os.path.join(os.path.dirname(__file__), "rings.json")
+    try:
+        if os.path.exists(rings_path):
+            with open(rings_path, "r", encoding="utf-8") as f:
+                arr = json.load(f)
+            if isinstance(arr, list) and all(isinstance(x, str) for x in arr):
+                return arr
+    except Exception:
+        pass
+    return list(_RINGS_DEFAULT)
+
+_RINGS_STARTS = _load_rings_starts()
+
+def _pair_no_for_time_range(time_range: str, tolerance_min: int = 25) -> Optional[int]:
+    """
+    Определяем номер пары по началу интервала 'HH:MM-HH:MM',
+    сопоставляя с началом пар в _RINGS_STARTS (с допуском).
+    Возвращает 1..N или None, если не удалось сопоставить.
+    """
+    start_min, _ = _range_to_bounds(time_range)
+    if start_min is None:
+        return None
+
+    best_idx = None
+    best_diff = 10**9
+    for idx, hhmm in enumerate(_RINGS_STARTS):
+        rm = _hhmm_to_min(hhmm)
+        if rm is None:
+            continue
+        diff = abs(start_min - rm)
+        if diff < best_diff:
+            best_diff = diff
+            best_idx = idx
+
+    if best_idx is not None and best_diff <= tolerance_min:
+        return best_idx + 1  # пары нумеруются с 1
+    return None
 
 def _get_time_end(lesson: dict) -> str:
     # самые частые алиасы «конца»
@@ -554,6 +620,8 @@ def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header
 
     for i, t in enumerate(slot_keys):
         slot = slots[t]
+        slot_no = _slot_no_by_time_range(t)
+        slot_emo = _num_emoji(slot_no) if slot_no else "•"
 
         if i > 0:
             lines.append("")  # пустая строка между слотами
@@ -561,7 +629,11 @@ def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header
         for f in slot:
             first_line_parts = []
             if f["time"]:
-                first_line_parts.append(f"<b>{f['time']}</b>.")
+                pno = _pair_no_for_time_range(f["time"])
+                if pno is not None:
+                    first_line_parts.append(f"{slot_emo} <b>{f['time']}</b>.")
+                else:
+                    first_line_parts.append(f"{slot_emo} <b>{f['time']}</b>.")
             if f["teacher"]:
                 # удобно копировать: тэг code
                 first_line_parts.append(f"<code>{f['teacher']}</code>")
@@ -664,8 +736,14 @@ async def jump_in_with_group_from_favorites(update, context, group_id: str, grou
         )
     return CHOOSE_RANGE
 
+def reset_selection(context):
+    """Сбрасывает текущие выборы пользователя (группа/преподаватель) в user_data."""
+    for k in ("group", "group_candidates", "teacher_id", "teacher_name", "teachers_map"):
+        context.user_data.pop(k, None)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # entry-point из меню: может прийти как callback_query, так и /schedule
+    # entry-point из меню: может прийти как callback_query, так и /schedul
+    reset_selection(context)
     if update.callback_query:
         await update.callback_query.answer()
         send = update.callback_query.edit_message_text
@@ -676,7 +754,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "⚠️ P.s. После 23:00 бот будет работать медленнее, ошибка не на нашей стороне\n\n2️⃣ Введите <b>название группы</b> (например, ПИ19-6):",
         parse_mode=ParseMode.HTML,
     )
-    context.user_data.clear()
     return ASK_GROUP
 
 async def favorite_group_entry(update, context):
@@ -1066,16 +1143,19 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 # ================== СБОРКА CONVERSATION ==================
-def build_schedule_groups_conv(entry_points):
+def build_schedule_groups_conv():
     return ConversationHandler(
         entry_points=[
-            *entry_points,
+            # Эти два entry point-а всегда доступны:
+            CallbackQueryHandler(start, pattern=r"^schedule_groups$"),
+            CommandHandler("schedule", start),
+
+            # Дополнительная точка входа из «Избранного»
             CallbackQueryHandler(favorite_group_entry, pattern=r"^favorite_group$"),
         ],
         states={
             ASK_GROUP:   [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_group)],
             CHOOSE_GROUP:[CallbackQueryHandler(choose_group, pattern=r"^grp:")],
-            # ⬇️ было только "^rng:", добавь ещё "^fav_group:"
             CHOOSE_RANGE:[
                 CallbackQueryHandler(choose_range, pattern=r"^rng:"),
                 CallbackQueryHandler(choose_range, pattern=r"^fav_group:"),
@@ -1086,4 +1166,5 @@ def build_schedule_groups_conv(entry_points):
         name="schedule_conv",
         persistent=False,
         per_message=False,
+        allow_reentry=True,  # ← ключ: разрешает входить по entry_points даже если диалог уже идёт
     )

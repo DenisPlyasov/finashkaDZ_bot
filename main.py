@@ -23,8 +23,8 @@ log = logging.getLogger("finashka-bot")
 
 
 # ===== КАНАЛ ДЛЯ ПОДПИСКИ =====
-CHANNEL_LINK = "https://t.me/question_finashkadzbot"
-CHANNEL_USERNAME = "-1003185836594"  # username канала для get_chat_member
+CHANNEL_LINK = f'{open('required_chanel_link.txt').readline()}'
+CHANNEL_USERNAME = f'{open('required_chaned_id.txt').readline()}'  # username канала для get_chat_member
 
 WELCOME_TEXT = (
     "Привет! 👋\n"
@@ -77,6 +77,16 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await q.answer("❌ Вы всё ещё не подписаны на канал.", show_alert=True)
         return ASK_SUBSCRIPTION
+
+
+
+def reset_selection(context):
+    """Сбрасывает текущие выборы пользователя (группа/преподаватель) в user_data."""
+    for k in ("group", "group_candidates", "teacher_id", "teacher_name", "teachers_map"):
+        context.user_data.pop(k, None)
+
+
+
 
 async def show_main_menu(update_or_q, context):
     """Показать главное меню"""
@@ -150,15 +160,44 @@ async def start_teacher_from_menu(update: Update, context: ContextTypes.DEFAULT_
         )
     return TS.ASK_TEACHER
 
-async def on_error(update: object, context):
-    log.exception("Unhandled error: %r", context.error)
-    try:
-        if hasattr(update, "callback_query") and update.callback_query:
-            await update.callback_query.answer("⚠️ Ошибка соединения. Попробуйте ещё раз.", show_alert=False)
-    except Exception:
-        pass
+from telegram.error import BadRequest
+import traceback
 
-token_value = open('token.txt').readline()
+async def on_error(update: object, context):
+    error = context.error
+
+    try:
+        # 1️⃣ Специальная защита от старых callback-ов (основная причина падений)
+        if isinstance(error, BadRequest) and (
+            "Query is too old" in str(error)
+            or "query id is invalid" in str(error)
+            or "response timeout expired" in str(error)
+        ):
+            # Просто тихо игнорируем ошибку — не показываем пользователю, не падаем
+            log.warning("⚠️ Игнорирую устаревший callback (Query too old / invalid id)")
+            return
+
+        # 2️⃣ Логируем остальные ошибки, но не роняем бота
+        log.exception("❗ Unhandled error: %r", error)
+        log.debug("".join(traceback.format_exception(None, error, error.__traceback__)))
+
+        # 3️⃣ Можно уведомить пользователя об общей ошибке (если callback живой)
+        if hasattr(update, "callback_query") and update.callback_query:
+            try:
+                await update.callback_query.answer(
+                    "⚠️ Ошибка соединения. Попробуйте ещё раз.",
+                    show_alert=False
+                )
+            except Exception:
+                pass  # если callback уже невалиден — просто игнорируем
+
+    except Exception as e:
+        log.critical("Ошибка внутри on_error(): %s", e)
+
+def reset_selection(context):
+    """Сбрасывает текущие выборы пользователя (группа/преподаватель) в user_data."""
+    for k in ("group", "group_candidates", "teacher_id", "teacher_name", "teachers_map"):
+        context.user_data.pop(k, None)
 
 def main():
     for var in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy"):
@@ -173,7 +212,7 @@ def main():
 
     app = (
         ApplicationBuilder()
-        .token(token_value)
+        .token(open('token.txt').readline())
         .request(request)
         .defaults(Defaults(parse_mode=ParseMode.HTML))
         .build()
@@ -199,10 +238,6 @@ def main():
 
     # ===== ДРУГИЕ ОБРАБОТЧИКИ =====
     schedule_conv = build_schedule_groups_conv(
-        entry_points=[
-            CallbackQueryHandler(groups_start, pattern=r"^schedule_groups$"),
-            CommandHandler("schedule", groups_start),
-        ]
     )
     app.add_handler(schedule_conv)
 

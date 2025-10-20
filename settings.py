@@ -2,7 +2,7 @@
 from telegram.constants import ParseMode
 import json
 import os
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes
 from fa_api import FaAPI  # твоя библиотека расписаний
@@ -12,6 +12,20 @@ from schedule_groups import _to_api_date, _filter_lessons_by_date, _fmt_day
 fa = FaAPI()  # создаём объект API
 
 FAV_FILE = "favorites.json"
+
+START_TEXT = (
+    "Привет! 👋\n"
+    "Я — помощник студентов твоего университета.\n"
+    "Могу напоминать о парах, хранить расписание и помогать с домашкой.\n\n"
+    "Выбери одну из опций ниже:"
+)
+START_KEYBOARD = InlineKeyboardMarkup(
+    [[
+        InlineKeyboardButton("Расписание", callback_data="schedule"),
+        InlineKeyboardButton("Домашняя работа", callback_data="homework"),
+        InlineKeyboardButton("Почта", callback_data="mail"),
+    ]]
+)
 
 
 # --- Работа с файлом избранных ---
@@ -38,8 +52,9 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     keyboard = [
         [InlineKeyboardButton("🕓 Выбрать время уведомлений", callback_data="choose_notify_time")],
+        [InlineKeyboardButton("📅 Выбрать день уведомлений", callback_data="choose_notify_day")],
         [InlineKeyboardButton("🔕 Отключить уведомления", callback_data="disable_notifications")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_schedule")]
+        [InlineKeyboardButton("⬅️ В меню", callback_data="back_to_schedule")]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     if q:
@@ -60,7 +75,6 @@ async def choose_notify_time(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     times = [f"{h:02d}:00" for h in range(6, 24)]
     keyboard = []
-
     for t in times:
         label = f"✅ {t}" if t in selected else t
         keyboard.append([InlineKeyboardButton(label, callback_data=f"toggle_time_{t}")])
@@ -70,6 +84,54 @@ async def choose_notify_time(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "Выберите время, в которое хотите получать уведомления для избранных групп:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+# --- Выбор дня уведомлений ---
+async def choose_notify_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    text = "Вы хотите получать уведомления на сегодня или на завтра?"
+    keyboard = [
+        [
+            InlineKeyboardButton("Сегодня", callback_data="set_day_today"),
+            InlineKeyboardButton("Завтра", callback_data="set_day_tomorrow"),
+        ],
+        [InlineKeyboardButton("📋 В меню", callback_data="settings_back")]
+    ]
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+# --- Установка дня уведомлений на сегодня ---
+async def set_day_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    user_id = str(update.effective_user.id)
+    data = load_favorites()
+    user_data = data.setdefault(user_id, {})
+    user_data["schedule_day"] = "today"
+    save_favorites(data)
+
+    text = "✅ Уведомления будут приходить на <b>сегодня</b>."
+    keyboard = [[InlineKeyboardButton("📋 В меню", callback_data="settings_back")]]
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+# --- Установка дня уведомлений на завтра ---
+async def set_day_tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    user_id = str(update.effective_user.id)
+    data = load_favorites()
+    user_data = data.setdefault(user_id, {})
+    user_data["schedule_day"] = "tomorrow"
+    save_favorites(data)
+
+    text = "✅ Уведомления будут приходить на <b>завтра</b>."
+    keyboard = [[InlineKeyboardButton("📋 В меню", callback_data="settings_back")]]
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
 # --- Переключение времени (галочка включается/выключается) ---
@@ -118,23 +180,19 @@ async def disable_notifications(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
-
-
 # --- отправка уведомлений с расписанием и дз ---
-async def send_notifications(context):
+async def send_notifications(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     chat_id = job.chat_id
-    today = datetime.now().date()
-    ds = _to_api_date(today)
-    job = context.job
-    chat_id = job.chat_id or (job.data or {}).get("user_id")
     if not chat_id:
         # нет адресата — тихо выходим
         return
     chat_id = int(chat_id)
+    today = datetime.now().date()
+
     # Загружаем избранные группы пользователя
     try:
-        with open("favorites.json", "r", encoding="utf-8") as f:
+        with open(FAV_FILE, "r", encoding="utf-8") as f:
             favorites = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         favorites = {}
@@ -143,6 +201,15 @@ async def send_notifications(context):
     if not user_data or "groups" not in user_data or not user_data["groups"]:
         await context.bot.send_message(chat_id, "❗ У вас нет избранных групп для уведомлений.")
         return
+
+    # Определяем день для уведомления (по умолчанию завтра)
+    day_pref = user_data.get("schedule_day", "tomorrow")
+    if day_pref == "today":
+        target_date = today
+    else:
+        target_date = today + timedelta(days=1)
+
+    ds = _to_api_date(target_date)
 
     # Для каждой группы — отправляем расписание и дз
     for group in user_data["groups"]:
@@ -165,7 +232,7 @@ async def send_notifications(context):
             )
 
             # 2️⃣ Отправляем домашку (если есть)
-            date_str = today.strftime("%d.%m.%Y")
+            date_str = target_date.strftime("%d.%m.%Y")
             try:
                 await send_homework_for_date(None, context, gname, date_str)
             except Exception as e:
@@ -178,15 +245,13 @@ async def send_notifications(context):
             )
 
 
-
-
 def register_notification_jobs(application):
     """Перерегистрировать уведомления для всех пользователей"""
-    import datetime
+    import datetime as _dt
     import zoneinfo
 
     tz = getattr(application.job_queue, "timezone", zoneinfo.ZoneInfo("Europe/Moscow"))
-    now = datetime.datetime.now(tz)
+    now = _dt.datetime.now(tz)
     data = load_favorites()
 
     # Удаляем старые задачи пользователей
@@ -195,6 +260,18 @@ def register_notification_jobs(application):
             job.schedule_removal()
 
     for user_id, info in data.items():
+        # Если у пользователя нет групп — пропускаем
+        if not info.get("groups"):
+            continue
+
+        # Устанавливаем значения по умолчанию при необходимости
+        if not info.get("schedule_day"):
+            info["schedule_day"] = "tomorrow"
+            save_favorites(data)
+        if not info.get("notify_times"):
+            info["notify_times"] = ["19:00"]
+            save_favorites(data)
+
         for t in info.get("notify_times", []):
             h, m = map(int, t.split(":"))
             target = now.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -212,11 +289,12 @@ def register_notification_jobs(application):
             # Ежедневное уведомление
             application.job_queue.run_daily(
                 send_notifications,
-                time=datetime.time(hour=h, minute=m),
+                time=_dt.time(hour=h, minute=m),
                 data={"user_id": int(user_id)},
                 chat_id=int(user_id),
                 name=f"notify_{user_id}_{t}_daily",
             )
+
 
 # --- Возврат в меню расписаний (плавно, без пересоздания сообщения) ---
 async def back_to_schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -226,17 +304,18 @@ async def back_to_schedule_menu(update: Update, context: ContextTypes.DEFAULT_TY
     await q.answer()
 
     text = (
-        "1️⃣ Выберете какое расписание вы хотите посмотреть.\n"
-        "Здесь вы сможете посмотреть расписание любой группы, расписание преподавателя, "
-        "а так же выбрать расписание уведомления которого будут вам приходить "
-        "(вместе с расписанием группы приходит и ее дз, если же конечно вы его ввели 😉)."
+        "Привет! 👋\n"
+        "Я — помощник студентов твоего университета. "
+        "Могу напоминать о парах и дз, хранить расписание и показывать дз других групп.\n"
+        "Мы только запустили бета тест, поэтому если будут какие-то ошибки или предложения пишите: @question_finashkadzbot\n\n"
+        "Выбери одну из опций ниже:"
     )
 
     keyboard = [
         [
-            InlineKeyboardButton("📘 Группы", callback_data="schedule_groups"),
-            InlineKeyboardButton("👨‍🏫 Преподаватели", callback_data="teachers_schedule"),
-            InlineKeyboardButton("⚙️ Настройки", callback_data="settings")
+            InlineKeyboardButton("Расписание", callback_data="schedule"),
+            InlineKeyboardButton("Домашняя работа", callback_data="homework"),
+            InlineKeyboardButton("Почта", callback_data="mail"),
         ]
     ]
 
@@ -245,6 +324,7 @@ async def back_to_schedule_menu(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML"
     )
+
 
 async def back_to_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await settings_menu(update, context)
@@ -256,6 +336,8 @@ def add_settings_handlers(app):
     app.add_handler(CallbackQueryHandler(choose_notify_time, pattern=r"^choose_notify_time$"))
     app.add_handler(CallbackQueryHandler(toggle_time, pattern=r"^toggle_time_"))
     app.add_handler(CallbackQueryHandler(disable_notifications, pattern=r"^disable_notifications$"))
+    app.add_handler(CallbackQueryHandler(choose_notify_day, pattern=r"^choose_notify_day$"))
+    app.add_handler(CallbackQueryHandler(set_day_today, pattern=r"^set_day_today$"))
+    app.add_handler(CallbackQueryHandler(set_day_tomorrow, pattern=r"^set_day_tomorrow$"))
     app.add_handler(CallbackQueryHandler(back_to_schedule_menu, pattern=r"^back_to_schedule$"))
     app.add_handler(CallbackQueryHandler(back_to_settings, pattern=r"^settings_back$"))
-

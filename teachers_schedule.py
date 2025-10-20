@@ -2,7 +2,6 @@ import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict
 import re
-from main import *
 from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -33,6 +32,48 @@ ASK_TEACHER, CHOOSE_TEACHER, CHOOSE_RANGE, ASK_CUSTOM_DATE = range(4)
 # ====== Утилиты форматирования ======
 _RU_WEEKDAY_ACC = {0:"понедельник", 1:"вторник", 2:"среду", 3:"четверг", 4:"пятницу", 5:"субботу", 6:"воскресенье"}
 
+RING_STARTS = ["08:30", "10:10", "11:50", "14:00", "15:40", "17:25", "18:55", "20:30"]
+
+def _num_emoji(n: int) -> str:
+    """1 -> 1️⃣, 10 -> 🔟, 11 -> 1️⃣1️⃣ и т.д."""
+    key = {
+        0:"0️⃣", 1:"1️⃣", 2:"2️⃣", 3:"3️⃣", 4:"4️⃣",
+        5:"5️⃣", 6:"6️⃣", 7:"7️⃣", 8:"8️⃣"
+    }
+    if n in key:
+        return key[n]
+    # для >10 собираем из цифр
+    digit = {"0":"0️⃣","1":"1️⃣","2":"2️⃣","3":"3️⃣","4":"4️⃣","5":"5️⃣","6":"6️⃣","7":"7️⃣","8":"8️⃣"}
+    return "".join(digit[ch] if ch in digit else ch for ch in str(n))
+
+def _slot_no_from_begin(begin: str) -> int | None:
+    """
+    Возвращает номер пары по времени начала begin.
+    Сначала ищем «почти точное» совпадение (±20 мин), иначе берём ближайшее.
+    """
+    try:
+        b = _mins(begin)
+    except Exception:
+        return None
+    ring_mins = []
+    for t in RING_STARTS:
+        try:
+            ring_mins.append(_mins(t))
+        except Exception:
+            ring_mins.append(None)
+    ring_mins = [m for m in ring_mins if m is not None]
+    if not ring_mins:
+        return None
+
+    # 1) жёсткая проверка в окне ±20 минут
+    for idx, m in enumerate(ring_mins):
+        if abs(m - b) <= 20:
+            return idx + 1
+
+    # 2) иначе ближайшее
+    idx = min(range(len(ring_mins)), key=lambda k: abs(ring_mins[k] - b))
+    return idx + 1
+
 def _weekday_acc(date_str: str) -> str:
     d = datetime.fromisoformat(date_str)  # YYYY-MM-DD
     return _RU_WEEKDAY_ACC[d.weekday()]
@@ -44,31 +85,6 @@ def _mins(t: str) -> int:
 def _fmt_day(records: list[dict], teacher_fallback: str = "Преподаватель") -> str:
     if not records:
         return "Занятий не найдено."
-
-    async def start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Точка входа при нажатии кнопки 'Преподаватель' из меню расписания."""
-        q = update.callback_query
-        if q:
-            await q.answer()
-        return await cmd_start(update, context)
-
-    def build_teachers_schedule_conv() -> ConversationHandler:
-        """Возвращает ConversationHandler для сценария расписания преподавателя."""
-        return ConversationHandler(
-            entry_points=[
-                CallbackQueryHandler(start_from_menu, pattern=r"^teachers_schedule$"),
-                CommandHandler("teacher_schedule", cmd_start),
-            ],
-            states={
-                ASK_TEACHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_teacher_surname)],
-                CHOOSE_TEACHER: [CallbackQueryHandler(on_pick_teacher, pattern=r"^pick_teacher:")],
-                CHOOSE_RANGE: [CallbackQueryHandler(on_pick_range, pattern=r"^range:")],
-                ASK_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_custom_date)],
-            },
-            fallbacks=[CommandHandler("teacher_schedule", cmd_start)],
-            name="timetable_conv",
-            persistent=False,
-        )
 
     def _val(x):  # None -> ""
         return (x or "").strip()
@@ -104,7 +120,9 @@ def _fmt_day(records: list[dict], teacher_fallback: str = "Преподават�
         if aud:   right_parts.append(aud)
         right = " — ".join(right_parts)
 
-        line1 = f"<b>{begin}–{end}.</b>" + (f" {right}." if right else "")
+        slot_no = _slot_no_from_begin(begin)
+        slot_emo = _num_emoji(slot_no) if slot_no else "•"
+        line1 = f"{slot_emo} <b>{begin}–{end}</b>." + (f" {right}." if right else "")
         kind_lc = kind.lower()
         kind_hint = "семинар" if "семинар" in kind_lc else ("лекция" if "лекц" in kind_lc else "")
         line2 = f"{subj} ({'<i>'+kind_hint+'</i>'})." if kind_hint else f"{subj}."
@@ -114,9 +132,9 @@ def _fmt_day(records: list[dict], teacher_fallback: str = "Преподават�
         u1, d1 = _val(r.get("url1")), _val(r.get("url1_description"))
         u2, d2 = _val(r.get("url2")), _val(r.get("url2_description"))
         if _is_http(u1):
-            link_lines.append(f"🔗 <a href=\"{u1}\">{d1 or 'Ссылка'}</a>")
+            line1 += f' (<a href="{u1}">онлайн</a>)'
         if _is_http(u2):
-            link_lines.append(f"🔗 <a href=\"{u2}\">{d2 or 'Ссылка 2'}</a>")
+            line1 += f' (<a href="{u2}">онлайн</a>)'
 
         block = f"{line1}\n{line2}"
         if link_lines:
@@ -198,12 +216,24 @@ def _is_source_down(exc: Exception) -> bool:
     return any(n in msg for n in needles)
 
 # ====== Хендлеры ======
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "⚠️ P.s. После 23:00 бот будет работать медленне, проблема на нашей стороне.\n\n2️⃣ Введите <b>фамилию преподавателя</b> \n" "(Например: <i>Неизвестный</i>): ",
-        parse_mode=ParseMode.HTML
+async def start_teacher_from_menu(update, context):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        text=(
+            "⚠️ P.s. После 23:00 бот будет работать медленне, проблема на нашей стороне.\n\n"
+            "2️⃣ Введите <b>фамилию преподавателя</b>\n"
+            "(Например: <i>Неизвестный</i>):"
+        ),
+        parse_mode=ParseMode.HTML,
     )
     return ASK_TEACHER
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        reset_selection(context)  # если импортирован — хорошо, нет — просто пропустим
+    except Exception:
+        pass
 
 async def _send_period_by_days(chat, teacher_id: int, start: datetime, end: datetime, teacher_name: str):
     try:
@@ -370,6 +400,29 @@ def _week_bounds(dt: datetime):
     sunday = monday + timedelta(days=6)
     return monday, sunday
 
+def _reset_teacher_selection(context):
+    for k in ("teacher_id", "teacher_name", "teachers_map"):
+        context.user_data.pop(k, None)
+
+async def start_teacher_from_menu(update, context):
+    _reset_teacher_selection(context)
+    q = getattr(update, "callback_query", None)
+    if q:
+        await q.answer()
+        send = q.edit_message_text
+    else:
+        send = update.message.reply_text
+
+    await send(
+        text=(
+            "⚠️ P.s. После 23:00 бот будет работать медленне, проблема на нашей стороне.\n\n"
+            "2️⃣ Введите <b>фамилию преподавателя</b>\n"
+            "(Например: <i>Неизвестный</i>):"
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+    return ASK_TEACHER
+
 async def on_pick_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -383,26 +436,29 @@ async def on_pick_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     teacher_id = context.user_data.get("teacher_id")
     teacher_name = context.user_data.get("teacher_name", "Преподаватель")
 
-    # === смена преподавателя ===
+    # смена преподавателя
     if choice == "change_teacher":
-        # очищаем сохранённого преподавателя и просим ввести заново
         context.user_data.pop("teacher_id", None)
         context.user_data.pop("teacher_name", None)
         await q.edit_message_text(
-            "⚠️ P.s. После 23:00 бот будет работать медленне, проблема на нашей стороне.\n\n2️⃣ Введите <b>фамилию преподавателя</b> \n" "(Например: <i>Неизвестный</i>): ",
-            parse_mode=ParseMode.HTML
+            text=(
+                "⚠️ P.s. После 23:00 бот будет работать медленне, проблема на нашей стороне.\n\n"
+                "2️⃣ Введите <b>фамилию преподавателя</b>\n"
+                "(Например: <i>Неизвестный</i>):"
+            ),
+            parse_mode=ParseMode.HTML,
         )
         return ASK_TEACHER
 
-    # === сегодня ===
+    # сегодня
     if choice == "today":
         start = end = datetime.combine(today, datetime.min.time())
         text = await _fetch_and_format(teacher_id, start, end, teacher_name)
         await q.edit_message_text(text, parse_mode=ParseMode.HTML)
-        # Показать снова меню выбора периода (чтобы не выходить из диалога)
         await _ask_range(update, context, edit=False)
         return CHOOSE_RANGE
 
+    # завтра
     if choice == "tomorrow":
         d = today + timedelta(days=1)
         start = end = datetime.combine(d, datetime.min.time())
@@ -411,47 +467,48 @@ async def on_pick_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _ask_range(update, context, edit=False)
         return CHOOSE_RANGE
 
-    # === эта неделя ===
+    # эта неделя
     if choice == "this_week":
         start, end = _week_bounds(datetime.combine(today, datetime.min.time()))
         try:
             await q.edit_message_text(
-                f"Расписание на неделю {start.strftime('%d.%m')}–{end.strftime('%d.%m')} — отправляю по дням…"
+                f"<b>Расписание на неделю ({start.strftime('%d.%m.%y')}–{end.strftime('%d.%m.%y')})</b>\n\n"
+                "Отправляю по дням ниже ⬇️",
+                parse_mode=ParseMode.HTML,
             )
         except Exception:
             pass
         await _send_period_by_days(update.effective_chat, teacher_id, start, end, teacher_name)
-        # завершающее сообщение с кнопками
         await _ask_range(update, context, edit=False)
         return CHOOSE_RANGE
 
-    # === следующая неделя ===
+    # следующая неделя
     if choice == "next_week":
         this_mon, this_sun = _week_bounds(datetime.combine(today, datetime.min.time()))
         start = this_mon + timedelta(days=7)
         end = this_sun + timedelta(days=7)
         try:
             await q.edit_message_text(
-                f"Расписание на след. неделю {start.strftime('%d.%m')}–{end.strftime('%d.%m')} — отправляю по дням…"
+                f"<b>Расписание на след. неделю ({start.strftime('%d.%m.%y')}–{end.strftime('%d.%m.%y')})</b>\n\n"
+                "Отправляю по дням ниже ⬇️",
+                parse_mode=ParseMode.HTML,
             )
         except Exception:
             pass
         await _send_period_by_days(update.effective_chat, teacher_id, start, end, teacher_name)
-        # завершающее сообщение с кнопками
         await _ask_range(update, context, edit=False)
         return CHOOSE_RANGE
 
-    # === выбрать дату ===
+    # выбрать дату
     if choice == "pick_date":
         await q.edit_message_text(
             "Введите дату в формате <b>YYYY-MM-DD</b> или <b>DD.MM.YYYY</b>:",
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
         )
         return ASK_CUSTOM_DATE
 
-    # === отмена — уже починено раньше ===
+    # отмена
     if choice == "cancel":
-        # вернуть в ГЛАВНОЕ меню (main)
         try:
             await q.edit_message_text(
                 WELCOME_TEXT_MAIN,
@@ -466,6 +523,9 @@ async def on_pick_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     return CHOOSE_RANGE
+
+async def teacher_schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await start_teacher_from_menu(update, context)
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.effective_chat.id
@@ -519,20 +579,20 @@ async def _fetch_and_format(teacher_id, start: datetime, end: datetime, teacher_
         return _fmt_day(day_items, teacher_fallback=teacher_name)
 
 # ====== Сборка приложения ======
-def main():
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", cmd_start)],
-        states={
-            ASK_TEACHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_teacher_surname)],
-            CHOOSE_TEACHER: [CallbackQueryHandler(on_pick_teacher, pattern=r"^pick_teacher:")],
-            CHOOSE_RANGE: [CallbackQueryHandler(on_pick_range, pattern=r"^range:")],
-            ASK_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_custom_date)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", cmd_start)],
-        name="timetable_conv",
-        persistent=False
-    )
-
-
-if __name__ == "__main__":
-    main()
+teacher_conv = ConversationHandler(
+    entry_points=[
+        CallbackQueryHandler(start_teacher_from_menu, pattern=r"^teachers_schedule$"),
+        CommandHandler("teacher_schedule", teacher_schedule_cmd),
+    ],
+    states={
+        ASK_TEACHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_teacher_surname)],
+        CHOOSE_TEACHER: [CallbackQueryHandler(on_pick_teacher, pattern=r"^pick_teacher:")],
+        CHOOSE_RANGE: [CallbackQueryHandler(on_pick_teacher, pattern=r"^range:")],
+        ASK_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_custom_date)],
+    },
+    # ВАЖНО: здесь НЕТ CommandHandler("start", ...)
+    fallbacks=[CommandHandler("cancel", cancel)],
+    name="teacher_conv",
+    persistent=False,
+    allow_reentry=True,   # ← позволяет «зайти заново» даже если вы уже в диалоге
+)

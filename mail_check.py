@@ -89,8 +89,8 @@ async def start_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if accounts:
         keyboard = [[InlineKeyboardButton(acc["email"], callback_data=f"mail_select:{i}")]
                     for i, acc in enumerate(accounts)]
-        keyboard.append([InlineKeyboardButton("➕ Добавить почту", callback_data="mail_add")])
-        keyboard.append([InlineKeyboardButton("🏠 В меню", callback_data="to_menu")])
+        keyboard.append([InlineKeyboardButton("Добавить почту", callback_data="mail_add")])
+        keyboard.append([InlineKeyboardButton("В меню", callback_data="to_menu")])
         await query.edit_message_text("📧 Выберите почту или добавьте новую:", reply_markup=InlineKeyboardMarkup(keyboard))
         return MAIL_SELECT_ACCOUNT
     else:
@@ -208,6 +208,35 @@ async def mail_checker_task(context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Ошибка при проверке {email_addr}: {e}")
                 continue
 
+
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    q = update.callback_query
+    await q.answer()
+
+    text = (
+        "Привет! 👋\n"
+        "Я — помощник студентов твоего университета. "
+        "Могу напоминать о парах и дз, хранить расписание и показывать дз других групп.\n"
+        "Мы только запустили бета тест, поэтому если будут какие-то ошибки или предложения пишите: @question_finashkadzbot\n\n"
+        "Выбери одну из опций ниже:"
+    )
+
+    keyboard = [
+        [  # первая строка
+            InlineKeyboardButton("Расписание", callback_data="schedule"),
+            InlineKeyboardButton("Домашняя работа", callback_data="homework"),
+            InlineKeyboardButton("Почта", callback_data="mail"),
+        ]
+    ]
+
+    await q.edit_message_text(
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
 # === Регистрация хэндлеров ===
 def add_mail_handlers(application):
     conv_handler = ConversationHandler(
@@ -221,4 +250,5 @@ def add_mail_handlers(application):
         name="mail_conv",
         persistent=False,
     )
+    application.add_handler(CallbackQueryHandler(back_to_menu, pattern=r"^to_menu$"))
     application.add_handler(conv_handler)
