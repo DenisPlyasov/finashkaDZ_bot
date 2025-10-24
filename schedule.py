@@ -10,8 +10,9 @@ SCHEDULE_START_TEXT = (
 async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
-            InlineKeyboardButton("Расписание", callback_data="schedule_groups"),
-            InlineKeyboardButton("Преподаватель", callback_data="teachers_schedule"),
+            InlineKeyboardButton("Группы", callback_data="schedule_groups"),
+            InlineKeyboardButton("Преподаватели", callback_data="teachers_schedule"),
+            InlineKeyboardButton("Настройки", callback_data="settings")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)

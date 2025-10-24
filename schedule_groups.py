@@ -21,11 +21,14 @@ from telegram.ext import (
 )
 from fa_api import FaAPI  # библиотека расписаний
 
+_RINGS_DEFAULT = ["08:30","10:15","12:00","13:50","15:35","17:20","19:05"]
+
+
 WELCOME_TEXT_MAIN = (
     "Привет! 👋\n"
     "Я — помощник студентов твоего университета. "
     "Могу напоминать о парах и дз, хранить расписание и показывать дз других групп.\n"
-    "Мы только запустили бета тест, поэтому если будут какие-то ошибки или предложения пишите: @crop_uhar\n\n"
+    "Мы только запустили бета тест, поэтому если будут какие-то ошибки или предложения пишите: @question_finashkadzbot\n\n"
     "Выбери одну из опций ниже:"
 )
 
@@ -102,30 +105,35 @@ def _fav_save(d):
 
 def _normalize_legacy_user_entry(entry):
     """
-    Миграция: если раньше хранилась одна группа в виде dict, превращаем в список.
+    Миграция старого формата. Сохраняем прочие разделы (например, teachers).
     """
     if not isinstance(entry, dict):
         return {"groups": []}
+
+    out = dict(entry)  # сохраняем всё, что уже есть
+
     groups = entry.get("groups")
     single = entry.get("group")
     if isinstance(groups, list):
-        return {"groups": [g for g in groups if isinstance(g, dict) and g.get("id")]}
-    if isinstance(single, dict) and single.get("id"):
-        return {"groups": [ {"id": str(single["id"]), "name": str(single.get("name") or single.get("title") or single.get("group") or single["id"])} ]}
-    return {"groups": []}
+        out["groups"] = [g for g in groups if isinstance(g, dict) and g.get("id")]
+    elif isinstance(single, dict) and single.get("id"):
+        out["groups"] = [{"id": str(single["id"]),
+                          "name": str(single.get("name") or single.get("title") or single.get("group") or single["id"])}]
+        out.pop("group", None)
+    else:
+        out.setdefault("groups", [])
+
+    return out
 
 def get_fav_groups(user_id: int):
-    """
-    Возвращает список избранных групп пользователя: [{"id": "...", "name": "..."}].
-    Гарантирует миграцию из старого формата.
-    """
     d = _fav_load()
     key = str(user_id)
-    entry = _normalize_legacy_user_entry(d.get(key, {}))
-    # если была миграция — сохраним
-    d[key] = entry
-    _fav_save(d)
-    return entry["groups"]
+    old_entry = d.get(key, {})
+    new_entry = _normalize_legacy_user_entry(old_entry)
+    if new_entry != old_entry:
+        d[key] = new_entry
+        _fav_save(d)
+    return new_entry.get("groups", [])
 
 def is_fav_group(user_id: int, gid: str) -> bool:
     gid = str(gid)
@@ -186,6 +194,69 @@ def _get_time_begin(lesson: dict) -> str:
         lesson.get("beginLesson"),
         lesson.get("time_begin"),
     )
+
+# ===== Нумерация пар по звонкам (можно переопределить через rings.json) =====
+import os, json
+
+RING_STARTS = ["08:30", "10:10", "11:50", "14:00", "15:40", "17:25", "18:55", "20:30"] # примерные времена
+
+def _num_emoji(n: int) -> str:
+    """1 -> 1️⃣, 10 -> 🔟, 11 -> 1️⃣1️⃣ и т.д."""
+    key = {0:"0️⃣",1:"1️⃣",2:"2️⃣",3:"3️⃣",4:"4️⃣",5:"5️⃣",6:"6️⃣",7:"7️⃣",8:"8️⃣"}
+    if n in key:
+        return key[n]
+    return "".join(key[int(ch)] if ch.isdigit() else ch for ch in str(n))
+
+def _slot_no_by_time_range(time_range: str) -> Optional[int]:
+    """Возвращает номер пары по времени начала (ближайший к RING_STARTS)."""
+    start_min, _ = _range_to_bounds(time_range)
+    if start_min is None:
+        return None
+    ring_mins = [_hhmm_to_min(x) for x in RING_STARTS if _hhmm_to_min(x) is not None]
+    if not ring_mins:
+        return None
+    idx = min(range(len(ring_mins)), key=lambda k: abs(ring_mins[k] - start_min))
+    return idx + 1
+
+def _load_rings_starts() -> list[str]:
+    """Читает файл rings.json (массив 'HH:MM'), если есть. Иначе — дефолт."""
+    rings_path = os.path.join(os.path.dirname(__file__), "rings.json")
+    try:
+        if os.path.exists(rings_path):
+            with open(rings_path, "r", encoding="utf-8") as f:
+                arr = json.load(f)
+            if isinstance(arr, list) and all(isinstance(x, str) for x in arr):
+                return arr
+    except Exception:
+        pass
+    return list(_RINGS_DEFAULT)
+
+_RINGS_STARTS = _load_rings_starts()
+
+def _pair_no_for_time_range(time_range: str, tolerance_min: int = 25) -> Optional[int]:
+    """
+    Определяем номер пары по началу интервала 'HH:MM-HH:MM',
+    сопоставляя с началом пар в _RINGS_STARTS (с допуском).
+    Возвращает 1..N или None, если не удалось сопоставить.
+    """
+    start_min, _ = _range_to_bounds(time_range)
+    if start_min is None:
+        return None
+
+    best_idx = None
+    best_diff = 10**9
+    for idx, hhmm in enumerate(_RINGS_STARTS):
+        rm = _hhmm_to_min(hhmm)
+        if rm is None:
+            continue
+        diff = abs(start_min - rm)
+        if diff < best_diff:
+            best_diff = diff
+            best_idx = idx
+
+    if best_idx is not None and best_diff <= tolerance_min:
+        return best_idx + 1  # пары нумеруются с 1
+    return None
 
 def _get_time_end(lesson: dict) -> str:
     # самые частые алиасы «конца»
@@ -554,6 +625,8 @@ def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header
 
     for i, t in enumerate(slot_keys):
         slot = slots[t]
+        slot_no = _slot_no_by_time_range(t)
+        slot_emo = _num_emoji(slot_no) if slot_no else "•"
 
         if i > 0:
             lines.append("")  # пустая строка между слотами
@@ -561,7 +634,11 @@ def _fmt_day(date_str: str, lessons: List[Dict[str, Any]], group_name_for_header
         for f in slot:
             first_line_parts = []
             if f["time"]:
-                first_line_parts.append(f"<b>{f['time']}</b>.")
+                pno = _pair_no_for_time_range(f["time"])
+                if pno is not None:
+                    first_line_parts.append(f"{slot_emo} <b>{f['time']}</b>.")
+                else:
+                    first_line_parts.append(f"{slot_emo} <b>{f['time']}</b>.")
             if f["teacher"]:
                 # удобно копировать: тэг code
                 first_line_parts.append(f"<code>{f['teacher']}</code>")
@@ -664,8 +741,14 @@ async def jump_in_with_group_from_favorites(update, context, group_id: str, grou
         )
     return CHOOSE_RANGE
 
+def reset_selection(context):
+    """Сбрасывает текущие выборы пользователя (группа/преподаватель) в user_data."""
+    for k in ("group", "group_candidates", "teacher_id", "teacher_name", "teachers_map"):
+        context.user_data.pop(k, None)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # entry-point из меню: может прийти как callback_query, так и /schedule
+    # entry-point из меню: может прийти как callback_query, так и /schedul
+    reset_selection(context)
     if update.callback_query:
         await update.callback_query.answer()
         send = update.callback_query.edit_message_text
@@ -673,10 +756,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         send = update.message.reply_text
 
     await send(
-        "2️⃣ Введите <b>название группы</b> (например, ПИ19-6):",
+        "⚠️ P.s. После 23:00 бот будет работать медленнее, ошибка не на нашей стороне\n\n2️⃣ Введите <b>название группы</b> (например, ПИ19-6):",
         parse_mode=ParseMode.HTML,
     )
-    context.user_data.clear()
     return ASK_GROUP
 
 async def favorite_group_entry(update, context):
@@ -698,6 +780,12 @@ async def favorite_group_entry(update, context):
     return CHOOSE_RANGE
 
 async def ask_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+
+    # пользователь явно хочет выйти/в меню – выходим
+    if text.lower() in {"меню", "главное меню", "отмена", "cancel"}:
+        await update.message.reply_text(WELCOME_TEXT_MAIN, reply_markup=_main_menu_kb())
+        return ConversationHandler.END
     query_text = (update.message.text or "").strip()
     if not query_text:
         await update.message.reply_text("Введите название группы ещё раз.")
@@ -763,10 +851,26 @@ async def choose_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     )
     return CHOOSE_RANGE
 
+async def exit_to_top_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Переиспользуем твой общий обработчик верхнего меню
+    from main import button_handler  # или откуда он у тебя импортируется
+    await button_handler(update, context)
+    return ConversationHandler.END
+
+async def start_cmd_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /start из любого состояния – показать главное меню и завершить диалог
+    await update.effective_chat.send_message(
+        WELCOME_TEXT_MAIN,
+        reply_markup=_main_menu_kb()
+    )
+    return ConversationHandler.END
+
 async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     action = query.data
+
+
 
     # 1) Общие ветки, не требующие выбранной группы
     if action == "rng:cancel":
@@ -798,8 +902,19 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     # 3) Кнопки избранного
     if action.startswith("fav_group:add:"):
         add_gid = action.split(":", 2)[2]
-        # на случай если нажали с другой карточки — всё равно добавим по ID
         add_fav_group(user_id, add_gid, gname if add_gid == str(gid) else add_gid)
+
+        # ⬇️ ВАЖНО: сразу проставляем дефолты и перевешиваем джобы ДЛЯ ЭТОГО ЮЗЕРА
+        try:
+            from settings import ensure_defaults_for_user, schedule_jobs_for_user
+            ensure_defaults_for_user(user_id)  # 'tomorrow' + ['19:00'] если пусто
+            schedule_jobs_for_user(context.application, user_id)  # пересоздать задачи только для user_id
+        except ImportError:
+            # если у тебя пока нет schedule_jobs_for_user — временный вариант:
+            from settings import ensure_defaults_for_user, register_notification_jobs
+            ensure_defaults_for_user(user_id)
+            register_notification_jobs(context.application)  # пересоздаст джобы для всех
+
         try:
             await query.edit_message_text(
                 f"✅ Группа <b>{gname}</b> добавлена в избранное.",
@@ -818,7 +933,13 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if action.startswith("fav_group:remove:"):
         rm_gid = action.split(":", 2)[2]
         remove_fav_group(user_id, rm_gid)
+
         try:
+            from settings import schedule_jobs_for_user
+            schedule_jobs_for_user(context.application, user_id)
+        except ImportError:
+            from settings import register_notification_jobs
+            register_notification_jobs(context.application)
             await query.edit_message_text(
                 f"🚫 Группа <b>{gname}</b> убрана из избранного.",
                 parse_mode=ParseMode.HTML,
@@ -966,49 +1087,67 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         )
         return CHOOSE_RANGE
 
-    ws, we = _week_bounds(today + timedelta(days=7))
-    ds, de = _to_api_date(ws), _to_api_date(we)
-    try:
-        raw = fa.timetable_group(gid, ds, de)
-        grouped = _group_by_date(raw)
-    except Exception as e:
-        logger.exception("Ошибка timetable next_week: %s", e)
-        await query.edit_message_text("Источник временно недоступен. Попробуйте позже.", reply_markup=_kb_ranges())
+    if action == "rng:pick_date":
+        await query.edit_message_text(
+            "Введите дату в формате <b>ДД.ММ.ГГГГ</b>:",
+            parse_mode=ParseMode.HTML,
+        )
+        return ASK_CUSTOM_DATE
+
+    if action == "rng:next_week":
+        ws, we = _week_bounds(today + timedelta(days=7))
+        ds, de = _to_api_date(ws), _to_api_date(we)
+        try:
+            raw = fa.timetable_group(gid, ds, de)
+            grouped = _group_by_date(raw)
+        except Exception as e:
+            logger.exception("Ошибка timetable next_week: %s", e)
+            await query.edit_message_text("Источник временно недоступен. Попробуйте позже.",
+                                          reply_markup=_kb_ranges(gid, gname, user_id))
+            return CHOOSE_RANGE
+
+        await query.edit_message_text(
+            f"<b>Расписание для {gname} на следующую неделю ({_to_human_date(ws)}–{_to_human_date(we)})</b>\n\nОтправляю по дням ниже ⬇️",
+            parse_mode=ParseMode.HTML,
+        )
+
+        chat_id = update.effective_chat.id
+        sent_any = False
+
+        for i in range(7):
+            d = ws + timedelta(days=i)
+            ds_day = _to_api_date(d)
+
+            lessons_day = grouped.get(ds_day, None)
+            if lessons_day is None:
+                try:
+                    raw_day = fa.timetable_group(gid, ds_day, ds_day)
+                    lessons_day = _filter_lessons_by_date(raw_day, ds_day)
+                except Exception:
+                    lessons_day = []
+
+            if lessons_day:
+                text_day = _fmt_day(ds_day, lessons_day, gname)
+                await context.bot.send_message(chat_id=chat_id, text=text_day, parse_mode=ParseMode.HTML)
+                date_str = _to_human_date(d)
+                await send_homework_for_date(update, context, gname, date_str)
+                sent_any = True
+
+        if not sent_any:
+            await context.bot.send_message(chat_id=chat_id, text="Нет занятий на следующей неделе.")
+
+        # 👇 лучше передавать текущую группу, чтобы остались кнопки избранного
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Выберите период:",
+            reply_markup=_kb_ranges(gid, gname, user_id)
+        )
         return CHOOSE_RANGE
 
-    await query.edit_message_text(
-        f"<b>Расписание для {gname} на следующую неделю ({_to_human_date(ws)}–{_to_human_date(we)})</b>\n\nОтправляю по дням ниже ⬇️",
-        parse_mode=ParseMode.HTML,
-    )
-
-    chat_id = update.effective_chat.id
-    sent_any = False
-
-    for i in range(7):
-        d = ws + timedelta(days=i)
-        ds_day = _to_api_date(d)
-
-        lessons_day = grouped.get(ds_day, None)
-        if lessons_day is None:
-            try:
-                raw_day = fa.timetable_group(gid, ds_day, ds_day)
-                lessons_day = _filter_lessons_by_date(raw_day, ds_day)
-            except Exception:
-                lessons_day = []
-
-        if lessons_day:
-            text_day = _fmt_day(ds_day, lessons_day, gname)
-            await context.bot.send_message(chat_id=chat_id, text=text_day, parse_mode=ParseMode.HTML)
-            # Домашка на этот день
-            date_str = _to_human_date(d)
-            await send_homework_for_date(update, context, gname, date_str)
-            sent_any = True
-
-    if not sent_any:
-        await context.bot.send_message(chat_id=chat_id, text="Нет занятий на следующей неделе.")
-
-    await context.bot.send_message(chat_id=chat_id, text="Выберите период:", reply_markup=_kb_ranges())
+        # Если сюда дошли — неизвестное действие. Просто ничего не меняем.
+    await query.answer()
     return CHOOSE_RANGE
+
 
 async def ask_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     m = DATE_INPUT_RE.match((update.message.text or "").strip())
@@ -1034,19 +1173,38 @@ async def ask_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("Не удалось определить ID группы. Введите название ещё раз.")
         return ASK_GROUP
 
-    ds = _to_api_date(d)
+    ds = _to_api_date(d)  # 'YYYY.MM.DD'
+
     try:
-        raw = fa.timetable_group(gid)
+        # 1) Сначала точечный запрос на выбранный день
+        raw = fa.timetable_group(gid, ds, ds)
         lessons = _filter_lessons_by_date(raw, ds)
+
+        # 2) Если пусто — fallback: неделя, где лежит дата
+        if not lessons:
+            ws, we = _week_bounds(d)
+            ds_w, de_w = _to_api_date(ws), _to_api_date(we)
+            raw_week = fa.timetable_group(gid, ds_w, de_w)
+            grouped = _group_by_date(raw_week)
+            lessons = grouped.get(ds, [])
     except Exception as e:
         logger.exception("Ошибка timetable by date: %s", e)
         await update.message.reply_text("Источник временно недоступен. Попробуйте позже.")
         return CHOOSE_RANGE
 
     text = _fmt_day(ds, lessons, gname)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_kb_ranges())
-    date_str = _to_human_date(d)
-    await send_homework_for_date(update, context, gname, date_str)
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=_kb_ranges(gid, gname, update.effective_user.id),  # сохраняем контекст кнопок
+    )
+
+    # Домашка на выбранную дату (молча игнорируем ошибки)
+    try:
+        await send_homework_for_date(update, context, gname, _to_human_date(d))
+    except Exception:
+        logger.warning("Не удалось получить домашку (custom date), пропускаю")
+
     return CHOOSE_RANGE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1066,24 +1224,37 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 # ================== СБОРКА CONVERSATION ==================
-def build_schedule_groups_conv(entry_points):
+def build_schedule_groups_conv():
     return ConversationHandler(
         entry_points=[
-            *entry_points,
+            CallbackQueryHandler(start, pattern=r"^schedule_groups$"),
+            CommandHandler("schedule", start),
             CallbackQueryHandler(favorite_group_entry, pattern=r"^favorite_group$"),
         ],
         states={
-            ASK_GROUP:   [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_group)],
-            CHOOSE_GROUP:[CallbackQueryHandler(choose_group, pattern=r"^grp:")],
-            # ⬇️ было только "^rng:", добавь ещё "^fav_group:"
-            CHOOSE_RANGE:[
+            ASK_GROUP: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_group),
+                # Любая верхняя кнопка — выходим из диалога
+                CallbackQueryHandler(exit_to_top_menu, pattern=r"^(schedule|homework|mail|settings)$"),
+            ],
+            CHOOSE_GROUP: [
+                CallbackQueryHandler(choose_group, pattern=r"^grp:"),
+                CallbackQueryHandler(exit_to_top_menu, pattern=r"^(schedule|homework|mail|settings)$"),
+            ],
+            CHOOSE_RANGE: [
                 CallbackQueryHandler(choose_range, pattern=r"^rng:"),
                 CallbackQueryHandler(choose_range, pattern=r"^fav_group:"),
+                CallbackQueryHandler(exit_to_top_menu, pattern=r"^(schedule|homework|mail|settings)$"),
             ],
-            ASK_CUSTOM_DATE:[MessageHandler(filters.TEXT & ~filters.COMMAND, ask_custom_date)],
+            ASK_CUSTOM_DATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_custom_date),
+                CallbackQueryHandler(exit_to_top_menu, pattern=r"^(schedule|homework|mail|settings)$"),
+            ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        name="schedule_conv",
-        persistent=False,
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start", start_cmd_exit),  # ← /start теперь тоже выходит
+        ],
+        allow_reentry=True,
         per_message=False,
     )
