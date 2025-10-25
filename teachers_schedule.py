@@ -14,6 +14,11 @@ import os, json, threading
 _FAV_FILE = os.path.join(os.path.dirname(__file__), "favorites.json")
 _FAV_LOCK = threading.Lock()
 
+def get_owner_key(update: Update) -> str:
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        return str(chat.id)              # БЕЗ "g:"
+    return str(update.effective_user.id) # БЕЗ "u:"
 
 WELCOME_TEXT_MAIN = (
     "Привет! 👋\n"
@@ -78,6 +83,19 @@ def _slot_no_from_begin(begin: str) -> int | None:
     idx = min(range(len(ring_mins)), key=lambda k: abs(ring_mins[k] - b))
     return idx + 1
 
+def _fav_teachers_menu(owner_key: str) -> InlineKeyboardMarkup | None:
+    favs = get_fav_teachers(owner_key)
+    if not favs:
+        return None
+    buttons = [
+        [InlineKeyboardButton(t.get("name") or "Преподаватель",
+                              callback_data=f"fav_teacher:open:{t['id']}")]
+        for t in favs
+        if t.get("id")
+    ]
+    buttons.append([InlineKeyboardButton("Ввести фамилию", callback_data="range:change_teacher")])
+    return InlineKeyboardMarkup(buttons)
+
 def _weekday_acc(date_str: str) -> str:
     d = datetime.fromisoformat(date_str)  # YYYY-MM-DD
     return _RU_WEEKDAY_ACC[d.weekday()]
@@ -110,39 +128,48 @@ def _get_user_entry(data, user_id: int):
     entry.setdefault("teachers", [])
     return key, entry
 
-def get_fav_teachers(user_id: int):
+def get_fav_teachers(owner_key: str):
     d = _fav_load()
-    _, entry = _get_user_entry(d, user_id)
+    _, entry = _get_owner_entry(d, owner_key)
     return entry["teachers"]
 
-def is_fav_teacher(user_id: int, tid: str) -> bool:
+def is_fav_teacher(owner_key: str, tid: str) -> bool:
     tid = str(tid)
-    return any(str(t.get("id")) == tid for t in get_fav_teachers(user_id))
+    return any(str(t.get("id")) == tid for t in get_fav_teachers(owner_key))
 
-def add_fav_teacher(user_id: int, tid: str, tname: str):
+def add_fav_teacher(owner_key: str, tid: str, tname: str):
     d = _fav_load()
-    key, entry = _get_user_entry(d, user_id)
+    key, entry = _get_owner_entry(d, owner_key)
     tid = str(tid)
     if not any(str(t.get("id")) == tid for t in entry["teachers"]):
         entry["teachers"].append({"id": tid, "name": str(tname)})
     d[key] = entry
     _fav_save(d)
 
-def remove_fav_teacher(user_id: int, tid: str):
+def remove_fav_teacher(owner_key: str, tid: str):
     d = _fav_load()
-    key, entry = _get_user_entry(d, user_id)
+    key, entry = _get_owner_entry(d, owner_key)
     tid = str(tid)
     entry["teachers"] = [t for t in entry["teachers"] if str(t.get("id")) != tid]
     d[key] = entry
     _fav_save(d)
 
+def _get_owner_entry(data: dict, owner_key: str):
+    entry = data.get(owner_key) or {}
+    if not isinstance(entry, dict):
+        entry = {}
+    entry.setdefault("groups", [])
+    entry.setdefault("teachers", [])
+    return owner_key, entry
+
 async def favorite_teacher_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    # ожидаем, что в callback_data придёт fav_teacher:open:<id>
     _, _, tid = q.data.split(":", 2)
-    # нужно знать имя — можно хранить его рядом с ID и подгрузить из файла:
-    favs = {t["id"]: t["name"] for t in get_fav_teachers(update.effective_user.id)}
+
+    owner_key = get_owner_key(update)
+    favs = {t["id"]: t["name"] for t in get_fav_teachers(owner_key)}
+
     context.user_data["teacher_id"] = tid
     context.user_data["teacher_name"] = favs.get(tid, "Преподаватель")
     await q.edit_message_text(f"Выбран: <b>{context.user_data['teacher_name']}</b>", parse_mode=ParseMode.HTML)
@@ -384,7 +411,8 @@ async def on_teacher_surname(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if len(teachers) == 1:
         t = teachers[0]
         context.user_data["teacher_id"] = t["id"]
-        context.user_data["teacher_name"] = t.get("name") or t.get("full_name") or t.get("title") or "Преподаватель"
+        # берём имя через универсальный сборщик ФИО
+        context.user_data["teacher_name"] = _teacher_fio_any(t) or "Преподаватель"
         return await _ask_range(update, context)
 
     # если несколько — даём кнопки выбора (первые 10)
@@ -429,23 +457,17 @@ async def on_pick_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text("Преподаватель выбран.")
     return await _ask_range(update, context, edit=False)
 
-def _kb_range_teacher(user_id: int, teacher_id: str | None, teacher_name: str | None) -> InlineKeyboardMarkup:
+def _kb_range_teacher(owner_key: str, teacher_id: str | None, teacher_name: str | None) -> InlineKeyboardMarkup:
     rows = [
-        [
-            InlineKeyboardButton("Сегодня", callback_data="range:today"),
-            InlineKeyboardButton("Завтра", callback_data="range:tomorrow"),
-        ],
-        [
-            InlineKeyboardButton("На неделю", callback_data="range:this_week"),
-            InlineKeyboardButton("На след. неделю", callback_data="range:next_week"),
-        ],
-        [
-            InlineKeyboardButton("Выбрать дату", callback_data="range:pick_date"),
-            InlineKeyboardButton("Сменить преподавателя", callback_data="range:change_teacher"),
-        ],
+        [InlineKeyboardButton("Сегодня", callback_data="range:today"),
+         InlineKeyboardButton("Завтра", callback_data="range:tomorrow")],
+        [InlineKeyboardButton("На неделю", callback_data="range:this_week"),
+         InlineKeyboardButton("На след. неделю", callback_data="range:next_week")],
+        [InlineKeyboardButton("Выбрать дату", callback_data="range:pick_date"),
+         InlineKeyboardButton("Сменить преподавателя", callback_data="range:change_teacher")],
     ]
     if teacher_id and teacher_name:
-        if is_fav_teacher(user_id, teacher_id):
+        if is_fav_teacher(owner_key, teacher_id):
             rows.append([InlineKeyboardButton("Убрать из избранного", callback_data=f"fav_teacher:remove:{teacher_id}")])
         else:
             rows.append([InlineKeyboardButton("Добавить в избранное", callback_data=f"fav_teacher:add:{teacher_id}")])
@@ -453,10 +475,10 @@ def _kb_range_teacher(user_id: int, teacher_id: str | None, teacher_name: str | 
     return InlineKeyboardMarkup(rows)
 
 async def _ask_range(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = True):
-    user_id = update.effective_user.id
+    owner_key = get_owner_key(update)
     teacher_id = context.user_data.get("teacher_id")
     teacher_name = context.user_data.get("teacher_name", "Преподаватель")
-    kb = _kb_range_teacher(user_id, teacher_id, teacher_name)
+    kb = _kb_range_teacher(owner_key, teacher_id, teacher_name)
 
     if edit and getattr(update, "message", None):
         await update.message.reply_text("Выберите период:", reply_markup=kb)
@@ -475,7 +497,10 @@ def _reset_teacher_selection(context):
         context.user_data.pop(k, None)
 
 async def start_teacher_from_menu(update, context):
-    _reset_teacher_selection(context)
+    # Жёстко чистим выбор, чтобы не подхватились старые/избранные
+    for k in ("teacher_id", "teacher_name", "teachers_map"):
+        context.user_data.pop(k, None)
+
     q = getattr(update, "callback_query", None)
     if q:
         await q.answer()
@@ -493,6 +518,7 @@ async def start_teacher_from_menu(update, context):
     )
     return ASK_TEACHER
 
+
 async def on_pick_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -501,24 +527,33 @@ async def on_pick_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Избранное преподавателя (добавить/убрать) ---
     if data.startswith("fav_teacher:"):
         _, action, tid = data.split(":", 2)
-        user_id = update.effective_user.id
+        owner_key = get_owner_key(update)
         teacher_id = context.user_data.get("teacher_id") or tid
         teacher_name = context.user_data.get("teacher_name", "Преподаватель")
 
+        # сначала меняем файл избранного (это у тебя работает)
         if action == "add":
-            add_fav_teacher(user_id, teacher_id, teacher_name)
-            from settings import ensure_defaults_for_user, register_notification_jobs
-            ensure_defaults_for_user(user_id)
-            register_notification_jobs(context.application)
+            add_fav_teacher(owner_key, teacher_id, teacher_name)
             msg = f"✅ Преподаватель <b>{teacher_name}</b> добавлен в избранное."
         else:
-            remove_fav_teacher(user_id, teacher_id)
+            remove_fav_teacher(owner_key, teacher_id)
             msg = f"🚫 Преподаватель <b>{teacher_name}</b> удалён из избранного."
 
+        # затем пытаемся пересоздать задачи уведомлений, но не ломаем UI если что-то пойдёт не так
+        try:
+            from settings import ensure_defaults_for_user, register_notification_jobs
+            ensure_defaults_for_user(owner_key)  # ← передаём owner_key!
+            register_notification_jobs(context.application)
+        except Exception as e:
+            # опционально: залогируй
+            # import logging; logging.getLogger(__name__).exception("jobs update failed: %s", e)
+            pass
+
+        # и ТЕПЕРЬ гарантированно обновляем текст и клавиатуру
         await q.edit_message_text(
             msg,
             parse_mode=ParseMode.HTML,
-            reply_markup=_kb_range_teacher(user_id, teacher_id, teacher_name),
+            reply_markup=_kb_range_teacher(owner_key, teacher_id, teacher_name),
         )
         return CHOOSE_RANGE
     # --- /Избранное ---

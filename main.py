@@ -13,6 +13,8 @@ import teachers_schedule as TS
 from settings import add_settings_handlers, register_notification_jobs
 from homework import *
 from mail_check import add_mail_handlers, mail_checker_task, start_mail
+from settings import migrate_favorites_keys
+migrate_favorites_keys()
 
 # ===== ЛОГГЕР =====
 logging.basicConfig(

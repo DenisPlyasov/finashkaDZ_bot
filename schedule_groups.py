@@ -64,6 +64,12 @@ _RU_WEEKDAY_NOM = {
 }
 _RU_WEEKDAY_SHORT = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
 
+def get_owner_key(update: Update) -> str:
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        return str(chat.id)              # БЕЗ "g:"
+    return str(update.effective_user.id) # БЕЗ "u:"
+
 def _norm_api_date_key(s: str) -> Optional[str]:
     if not isinstance(s, str):
         return None
@@ -134,6 +140,23 @@ def get_fav_groups(user_id: int):
         d[key] = new_entry
         _fav_save(d)
     return new_entry.get("groups", [])
+
+def _ensure_defaults_and_schedule(application, owner_key: str):
+    """
+    Гарантирует, что для owner_key будут сохранены:
+      schedule_day='tomorrow' и notify_times=['19:00'] (если их не было),
+    и пересоздаёт джобы уведомлений.
+    """
+    try:
+        # В settings эта функция уже есть и принимает int
+        from settings import ensure_defaults_for_user
+        ensure_defaults_for_user(int(owner_key))
+    except Exception:
+        pass
+
+    # Создаём/пересоздаём все задачи напоминаний
+    from settings import register_notification_jobs
+    register_notification_jobs(application)
 
 def is_fav_group(user_id: int, gid: str) -> bool:
     gid = str(gid)
@@ -694,25 +717,18 @@ def _group_name(g: Dict[str, Any]) -> str:
         or str(g.get("id") or g)
     )
 
-def _kb_ranges(gid: str = None, gname: str = None, user_id: int = None) -> InlineKeyboardMarkup:
+def _kb_ranges(gid: str = None, gname: str = None, owner_key: str | int = None) -> InlineKeyboardMarkup:
     rows = [
-        [
-            InlineKeyboardButton("Сегодня", callback_data="rng:today"),
-            InlineKeyboardButton("Завтра", callback_data="rng:tomorrow"),
-        ],
-        [
-            InlineKeyboardButton("На неделю", callback_data="rng:this_week"),
-            InlineKeyboardButton("След. неделя", callback_data="rng:next_week"),
-        ],
-        [
-            InlineKeyboardButton("Выбрать дату", callback_data="rng:pick_date"),
-            InlineKeyboardButton("Изменить группу", callback_data="rng:change_group"),
-        ],
+        [InlineKeyboardButton("Сегодня", callback_data="rng:today"),
+         InlineKeyboardButton("Завтра", callback_data="rng:tomorrow")],
+        [InlineKeyboardButton("На неделю", callback_data="rng:this_week"),
+         InlineKeyboardButton("След. неделя", callback_data="rng:next_week")],
+        [InlineKeyboardButton("Выбрать дату", callback_data="rng:pick_date"),
+         InlineKeyboardButton("Изменить группу", callback_data="rng:change_group")],
     ]
 
-    # Кнопка избранного для текущей группы (если есть контекст)
-    if gid and gname and user_id:
-        if is_fav_group(user_id, gid):
+    if gid and gname and owner_key:
+        if is_fav_group(str(owner_key), gid):
             rows.append([InlineKeyboardButton("Убрать из избранного", callback_data=f"fav_group:remove:{gid}")])
         else:
             rows.append([InlineKeyboardButton("Добавить в избранное", callback_data=f"fav_group:add:{gid}")])
@@ -720,12 +736,14 @@ def _kb_ranges(gid: str = None, gname: str = None, user_id: int = None) -> Inlin
     rows.append([InlineKeyboardButton("Отмена", callback_data="rng:cancel")])
     return InlineKeyboardMarkup(rows)
 
+
 # ================== ОБРАБОТЧИКИ ДИАЛОГА ==================
 
 async def jump_in_with_group_from_favorites(update, context, group_id: str, group_name: str):
     context.user_data["group"] = {"id": str(group_id), "name": str(group_name)}
+    owner_key = get_owner_key(update)
 
-    kb = _kb_ranges(str(group_id), str(group_name), update.effective_user.id)
+    kb = _kb_ranges(str(group_id), str(group_name), owner_key)
 
     if update.callback_query:
         await update.callback_query.edit_message_text(
@@ -771,17 +789,18 @@ async def favorite_group_entry(update, context):
 
     context.user_data["group"] = fav
     gid, gname = _group_id(fav), _group_name(fav)
+    owner_key = get_owner_key(update)
 
     await q.edit_message_text(
         f"Выбрана группа: <b>{gname}</b>\nТеперь выберите период:",
         parse_mode=ParseMode.HTML,
-        reply_markup=_kb_ranges(gid, gname, update.effective_user.id),
+        reply_markup=_kb_ranges(gid, gname, owner_key),
     )
     return CHOOSE_RANGE
 
 async def ask_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = (update.message.text or "").strip()
-
+    owner_key = get_owner_key(update)
     # пользователь явно хочет выйти/в меню – выходим
     if text.lower() in {"меню", "главное меню", "отмена", "cancel"}:
         await update.message.reply_text(WELCOME_TEXT_MAIN, reply_markup=_main_menu_kb())
@@ -809,7 +828,7 @@ async def ask_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(
             f"Вы выбрали группу: <b>{_group_name(chosen)}</b>\nТеперь выберите период:",
             parse_mode=ParseMode.HTML,
-            reply_markup=_kb_ranges(_group_id(chosen), _group_name(chosen), update.effective_user.id),
+            reply_markup=_kb_ranges(_group_id(chosen), _group_name(chosen), owner_key),
         )
         return CHOOSE_RANGE
 
@@ -828,6 +847,7 @@ async def ask_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def choose_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    owner_key = get_owner_key(update)
     await query.answer()
     data = query.data
     if data == "grp:retry":
@@ -847,7 +867,7 @@ async def choose_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.edit_message_text(
         f"Вы выбрали группу: <b>{_group_name(chosen)}</b>\nТеперь выберите период:",
         parse_mode=ParseMode.HTML,
-        reply_markup=_kb_ranges(_group_id(chosen), _group_name(chosen), update.effective_user.id),
+        reply_markup=_kb_ranges(_group_id(chosen), _group_name(chosen), owner_key),
     )
     return CHOOSE_RANGE
 
@@ -869,7 +889,7 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     query = update.callback_query
     await query.answer()
     action = query.data
-
+    owner_key = get_owner_key(update)
 
 
     # 1) Общие ветки, не требующие выбранной группы
@@ -902,55 +922,43 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     # 3) Кнопки избранного
     if action.startswith("fav_group:add:"):
         add_gid = action.split(":", 2)[2]
-        add_fav_group(user_id, add_gid, gname if add_gid == str(gid) else add_gid)
+        add_fav_group(owner_key, add_gid, gname if add_gid == str(gid) else add_gid)
 
-        # ⬇️ ВАЖНО: сразу проставляем дефолты и перевешиваем джобы ДЛЯ ЭТОГО ЮЗЕРА
-        try:
-            from settings import ensure_defaults_for_user, schedule_jobs_for_user
-            ensure_defaults_for_user(user_id)  # 'tomorrow' + ['19:00'] если пусто
-            schedule_jobs_for_user(context.application, user_id)  # пересоздать задачи только для user_id
-        except ImportError:
-            # если у тебя пока нет schedule_jobs_for_user — временный вариант:
-            from settings import ensure_defaults_for_user, register_notification_jobs
-            ensure_defaults_for_user(user_id)
-            register_notification_jobs(context.application)  # пересоздаст джобы для всех
+        # <-- здесь гарантируем дефолты + ставим джобы
+        _ensure_defaults_and_schedule(context.application, owner_key)
 
+        # Обновляем сообщение и клавиатуру
         try:
             await query.edit_message_text(
                 f"✅ Группа <b>{gname}</b> добавлена в избранное.",
                 parse_mode=ParseMode.HTML,
-                reply_markup=_kb_ranges(gid, gname, user_id),
+                reply_markup=_kb_ranges(gid, gname, owner_key),
             )
         except Exception:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"✅ Группа <b>{gname}</b> добавлена в избранное.",
                 parse_mode=ParseMode.HTML,
-                reply_markup=_kb_ranges(gid, gname, user_id),
+                reply_markup=_kb_ranges(gid, gname, owner_key),
             )
         return CHOOSE_RANGE
 
     if action.startswith("fav_group:remove:"):
-        rm_gid = action.split(":", 2)[2]
-        remove_fav_group(user_id, rm_gid)
+        rem_gid = action.split(":", 2)[2]
+        remove_fav_group(owner_key, rem_gid)
 
         try:
-            from settings import schedule_jobs_for_user
-            schedule_jobs_for_user(context.application, user_id)
-        except ImportError:
-            from settings import register_notification_jobs
-            register_notification_jobs(context.application)
             await query.edit_message_text(
-                f"🚫 Группа <b>{gname}</b> убрана из избранного.",
+                f"🚫 Группа <b>{gname}</b> удалена из избранного.",
                 parse_mode=ParseMode.HTML,
-                reply_markup=_kb_ranges(gid, gname, user_id),
+                reply_markup=_kb_ranges(gid, gname, owner_key),
             )
         except Exception:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=f"🚫 Группа <b>{gname}</b> убрана из избранного.",
+                text=f"🚫 Группа <b>{gname}</b> удалена из избранного.",
                 parse_mode=ParseMode.HTML,
-                reply_markup=_kb_ranges(gid, gname, user_id),
+                reply_markup=_kb_ranges(gid, gname, owner_key),
             )
         return CHOOSE_RANGE
 
@@ -984,7 +992,7 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="Выберите дальнейшее действие:",
-                reply_markup=_kb_ranges(gid, gname, user_id)
+                reply_markup=_kb_ranges(gid, gname, owner_key)
             )
 
         except Exception as e:
@@ -1026,7 +1034,7 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="Выберите дальнейшее действие:",
-                reply_markup=_kb_ranges(gid, gname, user_id)
+                reply_markup=_kb_ranges(gid, gname, owner_key)
             )
 
         except Exception as e:
@@ -1082,8 +1090,8 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text="Выберите период:",
-            reply_markup=_kb_ranges(gid, gname, user_id)
+            text="Выберите дальнейшее действие:",
+            reply_markup=_kb_ranges(gid, gname, owner_key)
         )
         return CHOOSE_RANGE
 
@@ -1139,8 +1147,8 @@ async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         # 👇 лучше передавать текущую группу, чтобы остались кнопки избранного
         await context.bot.send_message(
             chat_id=chat_id,
-            text="Выберите период:",
-            reply_markup=_kb_ranges(gid, gname, user_id)
+            text="Выберите дальнейшее действие:",
+            reply_markup=_kb_ranges(gid, gname, owner_key)
         )
         return CHOOSE_RANGE
 
@@ -1193,10 +1201,11 @@ async def ask_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return CHOOSE_RANGE
 
     text = _fmt_day(ds, lessons, gname)
+    owner_key = get_owner_key(update)
     await update.message.reply_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=_kb_ranges(gid, gname, update.effective_user.id),  # сохраняем контекст кнопок
+        reply_markup=_kb_ranges(gid, gname, owner_key),
     )
 
     # Домашка на выбранную дату (молча игнорируем ошибки)

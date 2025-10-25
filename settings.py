@@ -13,6 +13,72 @@ fa = FaAPI()  # создаём объект API
 
 FAV_FILE = os.path.join(os.path.dirname(__file__), "favorites.json")
 
+def _chat_id_from_key(key) -> int | None:
+    """
+    key: 'u:123', 'g:-4913426882' или '123'
+    -> возвращает int chat_id или None
+    """
+    if key is None:
+        return None
+    s = str(key)
+    if s.startswith(("u:", "g:")):
+        s = s.split(":", 1)[1]
+    try:
+        return int(s)
+    except Exception:
+        return None
+
+def migrate_favorites_keys():
+    try:
+        with open(FAV_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+
+    if not isinstance(data, dict):
+        return
+
+    changed = False
+    keys = list(data.keys())
+
+    for key in keys:
+        if isinstance(key, str) and key.startswith(("u:", "g:")):
+            pure = key.split(":", 1)[1]  # "u:123" -> "123"
+            old = data.get(key) or {}
+            new = data.get(pure) or {}
+
+            # аккуратно мёржим группы/преподов без дублей по id
+            for field in ("groups", "teachers"):
+                old_list = old.get(field) or []
+                new_list = new.get(field) or []
+                seen = {str(x.get("id")) for x in new_list if isinstance(x, dict)}
+                for item in old_list:
+                    if isinstance(item, dict) and str(item.get("id")) not in seen:
+                        new_list.append(item)
+                        seen.add(str(item.get("id")))
+                if new_list:
+                    new[field] = new_list
+
+            # переносим настройки, если их не было
+            if "schedule_day" not in new and "schedule_day" in old:
+                new["schedule_day"] = old["schedule_day"]
+            if "notify_times" not in new and "notify_times" in old:
+                new["notify_times"] = old["notify_times"]
+
+            data[pure] = new
+            del data[key]
+            changed = True
+
+    if changed:
+        with open(FAV_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_owner_key(update: Update) -> str:
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        return str(chat.id)              # БЕЗ "g:"
+    return str(update.effective_user.id) # БЕЗ "u:"
+
 START_TEXT = (
     "Привет! 👋\n"
     "Я — помощник студентов твоего университета.\n"
@@ -35,21 +101,6 @@ _RU_WEEKDAY_ACC = {
 def _mins(hhmm: str) -> int:
     h, m = map(int, hhmm.split(":"))
     return h * 60 + m
-
-def _ensure_defaults(user_id: str):
-    """Ставит schedule_day='tomorrow' и notify_times=['19:00'], если их нет."""
-    data = load_favorites()
-    user = data.setdefault(user_id, {})
-    changed = False
-    if not user.get("schedule_day"):
-        user["schedule_day"] = "tomorrow"
-        changed = True
-    if not user.get("notify_times"):
-        user["notify_times"] = ["19:00"]
-        changed = True
-    if changed:
-        save_favorites(data)
-    return user, changed
 
 def _weekday_acc(date_iso: str) -> str:
     # date_iso: "YYYY-MM-DD" (что возвращает timetable_teacher)
@@ -218,10 +269,10 @@ async def choose_notify_time(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Выберите время уведомлений через меню настроек.")
         return
 
-    user_id = str(update.effective_user.id)
+    owner_key = get_owner_key(update)
 
     # ← вот тут автопроставим tomorrow/19:00, если их ещё нет
-    user_data, changed = _ensure_defaults(user_id)
+    user_data, changed = _ensure_defaults(owner_key)
     if changed:
         # раз дефолты только что записали — сразу создадим задачи
         register_notification_jobs(context.application)
@@ -264,10 +315,10 @@ async def set_day_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    user_id = str(update.effective_user.id)
+    owner_key = get_owner_key(update)
     data = load_favorites()
-    user_data = data.setdefault(user_id, {})
-    user_data["schedule_day"] = "today"
+    user_data = data.setdefault(owner_key, {})
+    user_data["schedule_day"] = "today"  # или "tomorrow"
     save_favorites(data)
 
     text = "✅ Уведомления будут приходить на <b>сегодня</b>."
@@ -280,10 +331,10 @@ async def set_day_tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    user_id = str(update.effective_user.id)
+    owner_key = get_owner_key(update)
     data = load_favorites()
-    user_data = data.setdefault(user_id, {})
-    user_data["schedule_day"] = "tomorrow"
+    user_data = data.setdefault(owner_key, {})
+    user_data["schedule_day"] = "tomorrow" # или "tomorrow"
     save_favorites(data)
 
     text = "✅ Уведомления будут приходить на <b>завтра</b>."
@@ -296,9 +347,9 @@ async def toggle_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     time_str = q.data.replace("toggle_time_", "")
 
-    user_id = str(update.effective_user.id)
+    owner_key = get_owner_key(update)
     data = load_favorites()
-    user_data = data.setdefault(user_id, {})
+    user_data = data.setdefault(owner_key, {})
     times = set(user_data.get("notify_times", []))
 
     if time_str in times:
@@ -313,8 +364,6 @@ async def toggle_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_data["notify_times"] = sorted(times, key=time_key)
     save_favorites(data)
-
-    # пересоздаём задачи с учётом нового выбора
     register_notification_jobs(context.application)
 
     await choose_notify_time(update, context)
@@ -325,17 +374,20 @@ async def disable_notifications(update: Update, context: ContextTypes.DEFAULT_TY
     q = update.callback_query
     await q.answer()
 
-    user_id = str(update.effective_user.id)
+    owner_key = get_owner_key(update)
+
     data = load_favorites()
-    user_data = data.get(user_id)
+    user_data = data.get(owner_key)
     if user_data:
         user_data["notify_times"] = []
         save_favorites(data)
 
-    # удаляем все задачи из JobQueue, привязанные к этому user_id
+    # удаляем все задачи, привязанные к этому owner_key
     for job in context.application.job_queue.jobs():
-        jd = job.data if hasattr(job, "data") else None
-        if jd and jd.get("user_id") == int(user_id):
+        jd = getattr(job, "data", None) or {}
+        same_by_data = jd.get("user_id") and int(jd["user_id"]) == int(owner_key)
+        same_by_chat = getattr(job, "chat_id", None) and int(job.chat_id) == int(owner_key)
+        if same_by_data or same_by_chat:
             job.schedule_removal()
 
     await q.edit_message_text(
@@ -346,16 +398,20 @@ async def clear_notify_times(update: Update, context: ContextTypes.DEFAULT_TYPE)
     q = update.callback_query
     await q.answer()
 
-    user_id = str(update.effective_user.id)
-    data = load_favorites()
-    user_data = data.setdefault(user_id, {})
-    user_data["notify_times"] = []
-    save_favorites(data)
+    owner_key = get_owner_key(update)
 
-    # удаляем все задачи пользователя
+    data = load_favorites()
+    user_data = data.get(owner_key)
+    if user_data:
+        user_data["notify_times"] = []
+        save_favorites(data)
+
+    # удаляем все задачи, привязанные к этому owner_key
     for job in context.application.job_queue.jobs():
-        jd = job.data if hasattr(job, "data") else None
-        if jd and jd.get("user_id") == int(user_id):
+        jd = getattr(job, "data", None) or {}
+        same_by_data = jd.get("user_id") and int(jd["user_id"]) == int(owner_key)
+        same_by_chat = getattr(job, "chat_id", None) and int(job.chat_id) == int(owner_key)
+        if same_by_data or same_by_chat:
             job.schedule_removal()
 
     await q.edit_message_text("✅ Все времена уведомлений сняты.\nВы можете выбрать новые времена.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 В меню", callback_data="settings_back")]]))
@@ -377,12 +433,20 @@ async def send_notifications(context: ContextTypes.DEFAULT_TYPE):
     except (FileNotFoundError, json.JSONDecodeError):
         favorites = {}
 
-    user_data = favorites.get(str(chat_id)) or {}
+    user_data = (
+            favorites.get(str(chat_id)) or
+            favorites.get(f"u:{chat_id}") or
+            favorites.get(f"g:{chat_id}") or
+            {}
+    )
     fav_groups   = user_data.get("groups")   or []
     fav_teachers = user_data.get("teachers") or []
 
     if not fav_groups and not fav_teachers:
-        await context.bot.send_message(chat_id, "❗ У вас нет избранных групп или преподавателей для уведомлений.")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❗ У вас нет избранных групп или преподавателей для уведомлений."
+        )
         return
 
     # какой день шлём
@@ -391,7 +455,8 @@ async def send_notifications(context: ContextTypes.DEFAULT_TYPE):
     ds_api   = _to_api_date(target_date)          # "YYYY.MM.DD"
     day_iso  = target_date.strftime("%Y-%m-%d")   # "YYYY-MM-DD"
     date_hum = target_date.strftime("%d.%m.%Y")
-
+    if target_date.weekday() == 6:
+        return
     # --- 1) группы
     for group in fav_groups:
         gid = group.get("id")
@@ -444,47 +509,51 @@ def register_notification_jobs(application):
 
     tz = getattr(application.job_queue, "timezone", zoneinfo.ZoneInfo("Europe/Moscow"))
     now = _dt.datetime.now(tz)
-    data = load_favorites()
+    data = load_favorites() or {}
 
-    # Сносим старые задачи для тех юзеров, что есть в favorites
+    # (опционально) удаление старых задач
     for job in application.job_queue.jobs():
-        if job.data and str(job.data.get("user_id")) in data:
-            job.schedule_removal()
+        jd = getattr(job, "data", None)
+        # если хочешь чистить, ориентируйся на jd.get("user_id")
 
-    for user_id, info in data.items():
-        # Если нет ни групп, ни преподавателей — пропускаем
+    for owner_key, info in data.items():
+        # нет избранного — пропускаем
         if not (info.get("groups") or info.get("teachers")):
             continue
 
-        # ← гарантируем дефолты ('tomorrow', ['19:00']) если их нет
-        user_data, _ = _ensure_defaults(user_id)
-        notify_times = user_data["notify_times"]
-        if not notify_times:
-            # теоретически не должно случиться, но на всякий
+        chat_id = _chat_id_from_key(owner_key)
+        if chat_id is None:
             continue
 
+        notify_times = info.get("notify_times") or ["19:00"]
         for t in notify_times:
-            h, m = map(int, t.split(":"))
+            try:
+                h, m = map(int, t.split(":"))
+            except Exception:
+                continue
+
             target = now.replace(hour=h, minute=m, second=0, microsecond=0)
 
-            # разовое на сегодня (если время ещё не прошло)
+            # разовый запуск сегодня, если время ещё впереди
             if target > now:
                 application.job_queue.run_once(
                     send_notifications,
                     when=(target - now).total_seconds(),
-                    data={"user_id": int(user_id)},
-                    chat_id=int(user_id),
-                    name=f"notify_{user_id}_{t}_once",
+                    data={"user_id": chat_id},     # В JOB — ЧИСЛОВОЙ chat_id
+                    chat_id=chat_id,
+                    name=f"notify_{str(owner_key).replace(':','')}_{t}_once",
                 )
 
-            # ежедневное
+            # ежедневный запуск
             application.job_queue.run_daily(
                 send_notifications,
                 time=_dt.time(hour=h, minute=m),
-                data={"user_id": int(user_id)},
-                chat_id=int(user_id),
-                name=f"notify_{user_id}_{t}_daily",
+                data={"user_id": chat_id},         # В JOB — ЧИСЛОВОЙ chat_id
+                chat_id=chat_id,
+                name=f"notify_{str(owner_key).replace(':','')}_{t}_daily",
             )
+
+
 
 # --- Возврат в меню расписаний (плавно, без пересоздания сообщения) ---
 async def back_to_schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
