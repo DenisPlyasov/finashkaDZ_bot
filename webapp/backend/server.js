@@ -30,12 +30,12 @@ function getUserIdFromInitData(initData) {
   return user.id;
 }
 
-function runPython(cmd, query) {
+function runPython(cmd, args = []) {
   return new Promise((resolve, reject) => {
     const script = path.join(__dirname, 'fa_bridge.py');
     const pythonPath = path.join(__dirname, '.venv', 'bin', 'python');
 
-    const py = spawn(pythonPath, [script, cmd, query], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const py = spawn(pythonPath, [script, cmd, ...args.map(String)], { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let out = '';
     let err = '';
@@ -48,7 +48,7 @@ function runPython(cmd, query) {
       try {
         const json = JSON.parse(out);
         if (!json.ok) return reject(new Error(json.error || 'python error'));
-        resolve(json.items || []);
+        resolve(json);
       } catch (e) {
         reject(new Error(`bad python json: ${String(e)}`));
       }
@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS user_selection (
   updated_at INTEGER NOT NULL
 );
 `);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS user_selection_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  telegram_user_id INTEGER NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id INTEGER NOT NULL,
+  target_title TEXT NOT NULL,
+  used_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_selection_history_user_time
+  ON user_selection_history (telegram_user_id, used_at DESC);
+`);
+
 
 // -------- existing endpoints --------
 app.get('/api/ping', (req, res) => {
@@ -136,15 +150,15 @@ app.post('/api/search', async (req, res) => {
     if (!initData) return res.status(400).json({ error: 'initData missing' });
     if (!q || String(q).trim().length < 2) return res.json({ ok: true, items: [] });
 
-    // валидируем пользователя (и подпись initData)
     getUserIdFromInitData(initData);
 
     const query = String(q).trim();
     const cmd = type === 'teacher' ? 'search_teacher' : 'search_group';
-    const items = await runPython(cmd, query);
 
-    // ограничим, чтобы не перегружать UI
-    return res.json({ ok: true, items: items.slice(0, 7) });
+    const py = await runPython(cmd, [query]);
+    const items = (py.items || []).slice(0, 7);
+
+    return res.json({ ok: true, items });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -172,9 +186,81 @@ app.post('/api/selection/set', (req, res) => {
 
     stmt.run(userId, type, Number(id), String(title), now);
 
+    // обновляем историю: убираем дубль и добавляем как “последний”
+    db.prepare(`
+    DELETE FROM user_selection_history
+    WHERE telegram_user_id = ? AND target_type = ? AND target_id = ?
+    `).run(userId, type, Number(id));
+
+    db.prepare(`
+    INSERT INTO user_selection_history (telegram_user_id, target_type, target_id, target_title, used_at)
+    VALUES (?, ?, ?, ?, ?)
+    `).run(userId, type, Number(id), String(title), now);
+
+    // ограничиваем историю до 5 записей
+    db.prepare(`
+    DELETE FROM user_selection_history
+    WHERE telegram_user_id = ?
+      AND id NOT IN (
+        SELECT id FROM user_selection_history
+        WHERE telegram_user_id = ?
+        ORDER BY used_at DESC
+        LIMIT 5
+      )
+    `).run(userId, userId);
+
     return res.json({ ok: true });
   } catch (e) {
     return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/selection/history', (req, res) => {
+  try {
+    const { initData } = req.body || {};
+    if (!initData) return res.status(400).json({ error: 'initData missing' });
+
+    const userId = getUserIdFromInitData(initData);
+
+    const rows = db.prepare(`
+      SELECT target_type, target_id, target_title, used_at
+      FROM user_selection_history
+      WHERE telegram_user_id = ?
+      ORDER BY used_at DESC
+      LIMIT 5
+    `).all(userId);
+
+    return res.json({ ok: true, items: rows });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/timetable/has', async (req, res) => {
+  try {
+    const { initData, date } = req.body || {};
+    if (!initData) return res.status(400).json({ error: 'initData missing' });
+    if (!date) return res.status(400).json({ error: 'date missing' }); // "YYYY.MM.DD"
+
+    const userId = getUserIdFromInitData(initData);
+
+    const sel = db.prepare(`
+      SELECT target_type, target_id, target_title
+      FROM user_selection
+      WHERE telegram_user_id = ?
+    `).get(userId);
+
+    if (!sel) return res.status(404).json({ error: 'No selection' });
+
+    const cmd = sel.target_type === 'teacher' ? 'timetable_teacher' : 'timetable_group';
+
+    // Запрашиваем один день: start=end=date
+    const py = await runPython(cmd, [sel.target_id, date, date]);
+
+    const count = Number(py.count || 0);
+    return res.json({ ok: true, hasPairs: count > 0, count });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
