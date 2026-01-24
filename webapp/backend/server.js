@@ -264,6 +264,36 @@ app.post('/api/timetable/has', async (req, res) => {
   }
 });
 
+app.post('/api/timetable/day', async (req, res) => {
+  try {
+    const { initData, date } = req.body || {};
+    if (!initData) return res.status(400).json({ error: 'initData missing' });
+    if (!date) return res.status(400).json({ error: 'date missing' }); // "YYYY.MM.DD"
+
+    const userId = getUserIdFromInitData(initData);
+
+    const sel = db.prepare(`
+      SELECT target_type, target_id, target_title
+      FROM user_selection
+      WHERE telegram_user_id = ?
+    `).get(userId);
+
+    if (!sel) return res.status(404).json({ error: 'No selection' });
+
+    const cmd = sel.target_type === 'teacher' ? 'timetable_teacher' : 'timetable_group';
+
+    // один день
+    const py = await runPython(cmd, [sel.target_id, date, date]);
+
+    return res.json({
+      ok: true,
+      items: py.items || [],
+      count: Number(py.count || 0),
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 app.listen(8000, () => {
   console.log('Backend listening on http://localhost:8000');
 });

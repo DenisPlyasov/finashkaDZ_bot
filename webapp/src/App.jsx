@@ -54,6 +54,15 @@ function formatRuLine(d) {
   return `${day} ${month}${tail ? " • " + tail : ""}`;
 }
 
+function safeText(s) {
+  return (s ?? "").toString().trim();
+}
+
+function renderPairNo(n) {
+  if (!n) return "";
+  return `${n} ПАРА`;
+}
+
 export default function App() {
   const [initData, setInitData] = useState("");
   const [step, setStep] = useState("loading"); // loading | subscribe | groupGate | groupInput | schedule
@@ -77,6 +86,7 @@ export default function App() {
   const [weekStart, setWeekStart] = useState(() => startOfWeekMonday(new Date()));
   const [hasPairs, setHasPairs] = useState(false);
   const [pairsLoading, setPairsLoading] = useState(false);
+  const [pairs, setPairs] = useState([]); // <-- NEW
 
   // history dropdown
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -107,18 +117,27 @@ export default function App() {
     }
   };
 
-  const fetchHasPairs = async (d, data = initData) => {
+  // NEW: грузим пары за день
+  const fetchPairsForDate = async (d, data = initData) => {
     setPairsLoading(true);
     try {
-      const r = await fetch("/api/timetable/has", {
+      const r = await fetch("/api/timetable/day", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ initData: data, date: formatFaDate(d) }),
       });
       const res = await r.json();
-      if (r.ok) setHasPairs(!!res.hasPairs);
-      else setHasPairs(false);
+  
+      if (r.ok) {
+        const items = res.items || [];
+        setPairs(items);
+        setHasPairs(items.length > 0);
+      } else {
+        setPairs([]);
+        setHasPairs(false);
+      }
     } catch {
+      setPairs([]);
       setHasPairs(false);
     } finally {
       setPairsLoading(false);
@@ -192,16 +211,14 @@ export default function App() {
       if (res.selection) {
         setSelection(res.selection);
 
-        // schedule init: today
         const t = new Date();
         t.setHours(0, 0, 0, 0);
         setSelectedDate(t);
         setWeekStart(startOfWeekMonday(t));
         setHistoryOpen(false);
 
-        // подгрузка статуса пары + история
         await loadHistory(data);
-        await fetchHasPairs(t, data);
+        await fetchPairsForDate(t, data);
 
         setStep("schedule");
       } else {
@@ -336,7 +353,6 @@ export default function App() {
         target_title: chosen.title,
       });
 
-      // schedule init: today
       const t = new Date();
       t.setHours(0, 0, 0, 0);
       setSelectedDate(t);
@@ -344,7 +360,7 @@ export default function App() {
       setHistoryOpen(false);
 
       await loadHistory(initData);
-      await fetchHasPairs(t, initData);
+      await fetchPairsForDate(t, initData);
 
       setStatus("ok");
       setStep("schedule");
@@ -374,7 +390,6 @@ export default function App() {
     const dx = t.clientX - start.x;
     const dy = t.clientY - start.y;
 
-    // horizontal swipe only
     if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy) * 1.2) {
       onSwipe(dx < 0 ? "left" : "right");
     }
@@ -390,7 +405,6 @@ export default function App() {
   };
 
   const switchToFromHistory = async (item) => {
-    // item format from backend: {target_type,target_id,target_title,...}
     setHistoryOpen(false);
     setStatus("loading");
 
@@ -420,7 +434,7 @@ export default function App() {
       t.setHours(0, 0, 0, 0);
       setSelectedDate(t);
       setWeekStart(startOfWeekMonday(t));
-      await fetchHasPairs(t, initData);
+      await fetchPairsForDate(t, initData);
     } catch {
       // ignore
     } finally {
@@ -470,17 +484,17 @@ export default function App() {
       setAnim(d < selectedDate ? "left" : "right");
       setSelectedDate(d);
       setHistoryOpen(false);
-      await fetchHasPairs(d, initData);
+      await fetchPairsForDate(d, initData);
     };
 
     // свайп влево = следующий день, вправо = предыдущий
     const swipeMain = async (dir) => {
       const next = dir === "right" ? addDays(selectedDate, -1) : addDays(selectedDate, 1);
-      setAnim(dir === "right" ? "left" : "right"); // анимацию оставим "логичной": назад = left, вперёд = right
+      setAnim(dir === "right" ? "left" : "right");
       setSelectedDate(next);
       setWeekStart(startOfWeekMonday(next));
       setHistoryOpen(false);
-      await fetchHasPairs(next, initData);
+      await fetchPairsForDate(next, initData);
     };
 
     // свайп влево = следующая неделя, вправо = предыдущая
@@ -493,7 +507,7 @@ export default function App() {
       setAnim(dir === "right" ? "left" : "right");
       setSelectedDate(next);
       setHistoryOpen(false);
-      await fetchHasPairs(next, initData);
+      await fetchPairsForDate(next, initData);
     };
 
     return (
@@ -550,6 +564,10 @@ export default function App() {
           onTouchStart={(e) => handleTouchStart(touchWeek, e)}
           onTouchEnd={(e) => handleTouchEnd(touchWeek, swipeWeek, e)}
         >
+          <div
+            className="weekIndicator"
+            style={{ "--i": selectedIdx < 0 ? 0 : selectedIdx > 6 ? 6 : selectedIdx }}
+          />
           {days.map((d, i) => {
             const isSel = i === selectedIdx;
             return (
@@ -568,17 +586,39 @@ export default function App() {
         <div className="dateLine">{formatRuLine(selectedDate)}</div>
 
         <div
-          className="scheduleBody"
+          className={`scheduleBody ${hasPairs ? "hasPairs" : "noPairs"}`}
           onTouchStart={(e) => handleTouchStart(touchMain, e)}
           onTouchEnd={(e) => handleTouchEnd(touchMain, swipeMain, e)}
         >
-          <div className={`scheduleHint ${animDir ? `anim ${animDir}` : ""}`}>
-            {pairsLoading
-              ? "Проверяем пары…"
-              : hasPairs
-                ? "На текущую дату есть пары"
-                : "На текущую дату пар не найдено"}
-          </div>
+          {pairsLoading ? (
+            "Проверяем пары…"
+          ) : hasPairs ? (
+            <div className="pairsList">
+              {pairs.map((p, idx) => (
+                <div className="pairCard" key={`${p.time}-${idx}`}>
+                  <div className="pairTop">
+                    <div className="pairMeta">
+                      <img className="pairIcon" src="/pair-icon.png" alt="" />
+                      <span className="pairType">{p.type || "ПАРА"}</span>
+                      <span className="pairDot">•</span>
+                      <span className="pairNo">{p.pair_no ? `${p.pair_no} ПАРА` : "ПАРА"}</span>
+                    </div>
+
+                    <button className="pairAddBtn" aria-label="add" type="button">
+                      <img src="/add-hw-to-pair.png" alt="+" />
+                    </button>
+                  </div>
+
+                  <div className="pairTitle">{p.title || "Без названия"}</div>
+                  <div className="pairTeacher">{p.teacher || "—"}</div>
+                  <div className="pairRoom">{p.room || "—"}</div>
+                  <div className="pairTime">{p.time || ""}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            "На текущую дату пар не найдено"
+          )}
         </div>
       </div>
     );
