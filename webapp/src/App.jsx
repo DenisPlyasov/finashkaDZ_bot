@@ -10,6 +10,13 @@ const RU_MONTH = [
   "июля", "августа", "сентября", "октября", "ноября", "декабря"
 ];
 
+const RU_DOW_CAL = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+const RU_MONTH_CAP = [
+  "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+  "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+];
+
 function startOfWeekMonday(d) {
   const x = new Date(d);
   const day = x.getDay(); // 0 Sun .. 6 Sat
@@ -24,6 +31,33 @@ function addDays(d, n) {
   x.setDate(x.getDate() + n);
   x.setHours(0, 0, 0, 0);
   return x;
+}
+
+function startOfMonth(d) {
+  const x = new Date(d);
+  x.setDate(1);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function addMonths(d, n) {
+  const x = new Date(d);
+  x.setDate(1);
+  x.setMonth(x.getMonth() + n);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function sameDay(a, b) {
+  if (!a || !b) return false;
+  const x = new Date(a); x.setHours(0,0,0,0);
+  const y = new Date(b); y.setHours(0,0,0,0);
+  return x.getTime() === y.getTime();
+}
+
+function daysInMonth(d) {
+  const x = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+  return x.getDate();
 }
 
 function formatFaDate(d) {
@@ -87,6 +121,11 @@ export default function App() {
   const [hasPairs, setHasPairs] = useState(false);
   const [pairsLoading, setPairsLoading] = useState(false);
   const [pairs, setPairs] = useState([]); // <-- NEW
+
+  // calendar (full screen like mock)
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [calendarBaseMonth, setCalendarBaseMonth] = useState(() => startOfMonth(new Date()));
+  const calScrollRef = useRef(null);
 
   // history dropdown
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -164,6 +203,15 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!calendarOpen) return;
+    const elId = `cal-month-${calendarBaseMonth.getFullYear()}-${calendarBaseMonth.getMonth()}`;
+    requestAnimationFrame(() => {
+      const el = document.getElementById(elId);
+      el?.scrollIntoView({ block: "start" });
+    });
+  }, [calendarOpen, calendarBaseMonth]);
 
   // ===== subscription gate =====
   const autoCheckSubscription = async (data) => {
@@ -404,6 +452,28 @@ export default function App() {
     setStep("groupInput");
   };
 
+  const openCalendar = () => {
+    setHistoryOpen(false);
+    const base = startOfMonth(selectedDate);
+    setCalendarBaseMonth(base);
+    setCalendarOpen(true);
+  };
+
+  const closeCalendar = () => setCalendarOpen(false);
+
+  const pickCalendarDate = async (d) => {
+    const next = new Date(d);
+    next.setHours(0, 0, 0, 0);
+
+    setAnim(next < selectedDate ? "left" : "right");
+    setSelectedDate(next);
+    setWeekStart(startOfWeekMonday(next));
+    setHistoryOpen(false);
+
+    setCalendarOpen(false);
+    await fetchPairsForDate(next, initData);
+  };
+
   const switchToFromHistory = async (item) => {
     setHistoryOpen(false);
     setStatus("loading");
@@ -547,17 +617,91 @@ export default function App() {
                 )}
               </div>
             )}
+
+
           </div>
 
           <div className="topActions">
             <button className="iconBtn" aria-label="search" onClick={goToSearch}>
               <img src="/group-search.png" alt="search" />
             </button>
-            <button className="iconBtn" aria-label="date">
+            <button className="iconBtn" aria-label="date" onClick={openCalendar}>
               <img src="/date-choose.png" alt="date" />
             </button>
           </div>
         </div>
+
+        {calendarOpen && (() => {
+          const months = Array.from({ length: 25 }, (_, i) => addMonths(calendarBaseMonth, i - 12));
+
+          return (
+            <div className="calFull">
+              <div className="calTop">
+                <div className="calTopLeft" />
+                <div className="calTopTitle">Календарь</div>
+                <button className="calTopHide" onClick={closeCalendar} type="button">
+                  Скрыть
+                </button>
+              </div>
+
+              <div className="calScroll" ref={calScrollRef}>
+                {months.map((m) => {
+                  const y = m.getFullYear();
+                  const mo = m.getMonth();
+                  const first = new Date(y, mo, 1);
+                  first.setHours(0, 0, 0, 0);
+
+                  const leading = (first.getDay() + 6) % 7; // 0..6 (Пн..Вс)
+                  const dim = daysInMonth(first);
+                  const totalCells = Math.ceil((leading + dim) / 7) * 7;
+
+                  const cells = Array.from({ length: totalCells }, (_, idx) => {
+                    const dayNum = idx - leading + 1;
+                    if (dayNum < 1 || dayNum > dim) return null;
+                    const d = new Date(y, mo, dayNum);
+                    d.setHours(0, 0, 0, 0);
+                    return d;
+                  });
+
+                  return (
+                    <div className="calMonthBlock" key={`${y}-${mo}`} id={`cal-month-${y}-${mo}`}>
+                      <div className="calMonthTitle">
+                        {RU_MONTH_CAP[mo]} {y}
+                      </div>
+
+                      <div className="calDowRow">
+                        {RU_DOW_CAL.map((d) => (
+                          <div key={d} className="calDowCell">{d}</div>
+                        ))}
+                      </div>
+
+                      <div className="calGrid">
+                        {cells.map((d, idx) => {
+                          if (!d) return <div key={idx} className="calEmpty" />;
+
+                          const isSel = sameDay(d, selectedDate);
+                          return (
+                            <button
+                              key={idx}
+                              type="button"
+                              className={`calDay ${isSel ? "sel" : ""}`}
+                              onClick={() => pickCalendarDate(d)}
+                            >
+                              {d.getDate()}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                <div className="calBottomPad" />
+              </div>
+            </div>
+          );
+        })()}
+
 
         <div
           className="weekRow"
@@ -586,7 +730,7 @@ export default function App() {
         <div className="dateLine">{formatRuLine(selectedDate)}</div>
 
         <div
-          className={`scheduleBody ${hasPairs ? "hasPairs" : "noPairs"}`}
+          className={`scheduleBody ${hasPairs ? "hasPairs" : "noPairs"} ${pairsLoading ? "isLoading" : ""}`}
           onTouchStart={(e) => handleTouchStart(touchMain, e)}
           onTouchEnd={(e) => handleTouchEnd(touchMain, swipeMain, e)}
         >

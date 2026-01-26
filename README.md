@@ -1,2 +1,0 @@
-# finashkaDZ_bot
-проверка 

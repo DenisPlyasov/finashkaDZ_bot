@@ -505,6 +505,14 @@ html, body, #root {
   place-items: center;
 }
 
+/* Центровка текста загрузки/пустого состояния */
+.scheduleBody.isLoading{
+  place-items: center !important;
+  align-content: center !important;
+  overflow: hidden !important;
+  padding: 0 !important;
+}
+
 .scheduleHint {
   font-size: 22px;
   font-weight: 900;
@@ -720,7 +728,7 @@ html, body, #root {
   font-weight: 900;
   letter-spacing: 0.6px;
   text-transform: uppercase;
-  font-size: 9px; /* было ~14 => -5 */
+  font-size: 12px; /* было ~14 => -5 */
 }
 
 .pairIcon{
@@ -743,21 +751,21 @@ html, body, #root {
 }
 
 .pairAddBtn img{
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   opacity: 0.9;
 }
 
 .pairTitle{
   font-weight: 900;
-  font-size: 12px; /* было ~22 => -10 */
+  font-size: 16px; /* было ~22 => -10 */
   line-height: 1.15;
   color: rgba(255,255,255,0.95);
   margin-bottom: 6px;
 }
 
 .pairTeacher{
-  font-size: 11px; /* -5 */
+  font-size: 14px; /* -5 */
   font-weight: 700;
   color: rgba(255,255,255,0.60);
   line-height: 1.25;
@@ -765,7 +773,7 @@ html, body, #root {
 
 .pairRoom{
   margin-top: 3px;
-  font-size: 11px; /* -5 */
+  font-size: 14px; /* -5 */
   font-weight: 700;
   color: rgba(255,255,255,0.60);
   line-height: 1.25;
@@ -773,7 +781,7 @@ html, body, #root {
 
 .pairTime{
   margin-top: 6px;
-  font-size: 13px; /* -5 */
+  font-size: 15px; /* -5 */
   font-weight: 900;
   color: #6b5cff;
   letter-spacing: 0.2px;
@@ -790,3 +798,223 @@ html, body {
   margin: 0;         /* ✅ убираем центрирование контейнера */
   padding: 0;        /* ✅ убираем внутренние поля, которые "съедают" ширину */
 }
+
+
+/* ===== Fullscreen Calendar (like mock) ===== */
+.calFull{
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: #111;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+}
+
+.calTop{
+  height: 56px;
+  padding: 12px 16px 8px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+}
+
+.calTopLeft{ height: 1px; }
+
+.calTopTitle{
+  font-weight: 900;
+  font-size: 18px;
+  text-align: center;
+  opacity: 0.95;
+}
+
+.calTopHide{
+  justify-self: end;
+  border: 0;
+  background: transparent;
+  font-weight: 900;
+  font-size: 18px;
+  color: var(--primary);
+  padding: 8px 10px;
+  border-radius: 12px;
+}
+
+.calTopHide:active{
+  opacity: 0.75;
+}
+
+.calScroll{
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 16px 0;
+}
+
+.calMonthBlock{
+  padding: 10px 0 24px;
+}
+
+.calMonthTitle{
+  font-size: 40px;
+  font-weight: 1000;
+  letter-spacing: -0.6px;
+  margin: 6px 0 10px;
+  opacity: 0.98;
+}
+
+.calDowRow{
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 0 2px;
+}
+
+.calDowCell{
+  text-align: center;
+  font-size: 16px;
+  font-weight: 900;
+  color: rgba(255,255,255,0.35);
+}
+
+.calGrid{
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 16px 10px; /* вертикаль/горизонталь */
+  padding: 6px 2px 0;
+}
+
+.calEmpty{
+  height: 44px;
+}
+
+.calDay{
+  height: 44px;
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  font-size: 22px;
+  font-weight: 900;
+  color: rgba(107,92,255,0.95);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.calDay:active{
+  transform: scale(0.98);
+  opacity: 0.85;
+}
+
+.calDay.sel{
+  background: rgba(107,92,255,0.95);
+  color: #fff;
+}
+
+.calBottomPad{
+  height: 24px;
+}
+
+/* ===== Calendar tweaks ===== */
+
+/* 7 колонок всегда, без сжатия до 4 */
+.calDowRow,
+.calGrid{
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+/* Убираем "пропуск" между днями недели и числами */
+.calDowRow{
+  gap: 10px;
+  margin-bottom: 0;      /* было 10px */
+  padding: 0 2px;
+}
+
+.calGrid{
+  gap: 10px 10px;        /* было 16px 10px */
+  padding: 0 2px 0;      /* было 6px сверху */
+  align-items: stretch;
+}
+
+/* Уменьшаем шрифты календаря на 10px (кроме "Календарь" и "Скрыть") */
+.calMonthTitle{
+  font-size: 30px;       /* было 40px */
+  margin: 6px 0 8px;
+}
+
+.calDowCell{
+  font-size: 15px;        /* было 16px */
+  font-weight: 900;
+}
+
+/* День — чтобы не ломалось в 4 колонки */
+.calDay{
+  width: 100%;
+  height: 34px;          /* было 44px */
+  font-size: 15px;       /* было 22px */
+  border-radius: 999px;
+}
+
+.calEmpty{
+  height: 34px;          /* было 44px */
+}
+
+/* Немного компактнее блок месяца */
+.calMonthBlock{
+  padding: 8px 0 18px;   /* было 10px 0 24px */
+}
+
+/* === FIX: центрируем синий кружок на выбранной дате === */
+.calDay{
+  position: relative;
+  isolation: isolate;     /* чтобы ::before с z-index:-1 был позади текста */
+  padding: 0;             /* на всякий случай убираем смещения */
+  line-height: 1;         /* чтобы цифра не "плавала" по вертикали */
+}
+
+/* кружок-выделение */
+.calDay::before{
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+
+  height: 100%;
+  width: auto;
+  aspect-ratio: 1 / 1;    /* width вычислится из height => всегда круг */
+
+  border-radius: 999px;
+  background: transparent;
+  z-index: -1;
+}
+
+/* выбранный день */
+.calDay.sel{
+  background: transparent !important;  /* убираем "пилюлю" */
+  color: #fff;
+}
+
+.calDay.sel::before{
+  background: rgba(107,92,255,0.95);   /* твой primary */
+}
+
+.pairCard{
+  position: relative; /* база для absolute */
+  padding-bottom: 12px; /* оставь как у тебя или чуть увеличь, если нужно */
+}
+
+/* кнопка — в правый низ карточки */
+.pairAddBtn{
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  margin: 0 !important;
+}
+
+/* чтобы снизу справа не наезжало на время */
+.pairTime{
+  padding-right: 60px; /* место под кнопку (46px + воздух) */
+}
+
