@@ -1360,3 +1360,193 @@ html, body {
 .hwDeadline{
   padding-right: 60px;
 }
+
+/* ===== Files (name screen) ===== */
+.fileFull{
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  background: #000;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+}
+
+.fileContent{
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 18px 14px 18px;
+}
+
+.fileTitle{
+  text-align: center;
+  font-weight: 1000;
+  font-size: 20px;
+  margin: 8px 0 14px;
+}
+
+.fileCard{
+  background: rgba(255,255,255,0.08);
+  border-radius: 18px;
+  padding: 14px 14px 12px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.45);
+  margin-bottom: 14px;
+}
+
+.fileRow{
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.fileLabel{
+  font-weight: 900;
+  color: rgba(255,255,255,0.55);
+  font-size: 14px;
+}
+
+.fileValue{
+  font-weight: 900;
+  color: rgba(255,255,255,0.92);
+  font-size: 14px;
+  text-align: right;
+  word-break: break-word;
+}
+
+.fileSectionTitle{
+  text-align: center;
+  font-size: 18px;
+  font-weight: 900;
+  margin: 10px 0 10px;
+}
+
+.fileInput{
+  width: 100%;
+  padding: 14px 14px;
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  outline: none;
+  background: rgba(0,0,0,0.25);
+  color: rgba(255,255,255,0.92);
+  font-size: 16px;
+  margin-bottom: 14px;
+}
+
+.fileBtns{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+/* ===== Files list inside HW screen ===== */
+.hwFilesList{
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.hwFileItem{
+  background: rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 12px 12px;
+  box-shadow: 0 10px 20px rgba(0,0,0,0.35);
+}
+
+.hwFileName{
+  font-weight: 1000;
+  font-size: 15px;
+  color: rgba(255,255,255,0.95);
+  line-height: 1.2;
+}
+
+.hwFileMeta{
+  margin-top: 4px;
+  font-weight: 900;
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
+  word-break: break-word;
+}
+
+/* ===== File row like mock: icon + original name + X on grid ===== */
+
+.hwFileRow{
+  background: rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 12px 12px;
+  box-shadow: 0 10px 20px rgba(0,0,0,0.35);
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hwFileLeft{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.hwFileIcon{
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  opacity: 0.9;
+}
+
+.hwFileTitle{
+  font-weight: 1000;
+  font-size: 14px;
+  color: rgba(255,255,255,0.95);
+  line-height: 1.2;
+
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* крестик "за решёткой" */
+.fileRemoveBtn{
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+
+  display: grid;
+  place-items: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.fileRemoveBtn::before{
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+
+  /* сетка */
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.18) 0 1px, transparent 1px 7px),
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.12) 0 1px, transparent 1px 7px);
+  opacity: 0.22;
+}
+
+.fileRemoveBtn span{
+  position: relative;
+  font-size: 18px;
+  font-weight: 1000;
+  line-height: 1;
+  color: rgba(255,255,255,0.92);
+}
+
+.fileRemoveBtn:active{
+  transform: scale(0.98);
+  opacity: 0.85;
+}

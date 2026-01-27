@@ -180,6 +180,19 @@ export default function App() {
   const [confirmText, setConfirmText] = useState("");
   const confirmActionRef = useRef(null);
 
+  // ===== Files flow (shared) =====
+  const fileInputAddRef = useRef(null);
+  const fileInputEditRef = useRef(null);
+
+  const [fileNameOpen, setFileNameOpen] = useState(false);
+  const [pendingFile, setPendingFile] = useState(null); // File
+  const [pendingDisplayName, setPendingDisplayName] = useState("");
+  const [pendingFor, setPendingFor] = useState(null); // "draft" | "homework"
+  const [filesUploading, setFilesUploading] = useState(false);
+
+  const [hwFiles, setHwFiles] = useState([]);         // files for draft screen
+  const [hwEditFiles, setHwEditFiles] = useState([]); // files for edit screen
+
   const openConfirm = (text, onConfirm) => {
     setConfirmText(text);
     confirmActionRef.current = onConfirm;
@@ -385,6 +398,100 @@ export default function App() {
     }
   };
 
+  const uploadPendingFile = async () => {
+    try {
+      if (!pendingFile) return;
+
+      const init = String(initData ?? "").trim();
+      if (!init) {
+        window.Telegram?.WebApp?.showAlert?.("initData пустой — откройте миниапп в Telegram");
+        return;
+      }
+
+      const displayName = safeText(pendingDisplayName) || pendingFile.name;
+
+      const fd = new FormData();
+      fd.append("initData", init);
+      fd.append("display_name", displayName);
+      fd.append("file", pendingFile);
+
+      let url = "";
+      if (pendingFor === "draft") {
+        if (!hwDraftId) return;
+        fd.append("draft_id", String(hwDraftId));
+        url = "/api/hw/draft/file/add";
+      } else {
+        if (!hwEditItem?.id) return;
+        fd.append("homework_id", String(hwEditItem.id));
+        url = "/api/hw/file/add";
+      }
+
+      setFilesUploading(true);
+      const r = await fetch(url, { method: "POST", body: fd });
+      const res = await r.json();
+      if (!r.ok || !res.ok) throw new Error(res?.error || "upload failed");
+
+      if (pendingFor === "draft") setHwFiles(res.files || []);
+      else setHwEditFiles(res.files || []);
+
+      setFileNameOpen(false);
+      setPendingFile(null);
+      setPendingDisplayName("");
+      setPendingFor(null);
+    } catch (e) {
+      window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+    } finally {
+      setFilesUploading(false);
+    }
+  };
+
+  // ===== Files remove =====
+const removeDraftFile = async (fileId) => {
+  try {
+    if (!hwDraftId) return;
+
+    const r = await fetch("/api/hw/draft/file/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        initData: String(initData ?? "").trim(),
+        draft_id: hwDraftId,
+        file_id: fileId,
+      }),
+    });
+
+    const res = await r.json();
+    if (!r.ok || !res.ok) throw new Error(res?.error || "remove failed");
+
+    setHwFiles(res.files || []);
+  } catch (e) {
+    window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+  }
+};
+
+const removeHomeworkFile = async (fileId) => {
+  try {
+    if (!hwEditItem?.id) return;
+
+    const r = await fetch("/api/hw/file/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        initData: String(initData ?? "").trim(),
+        homework_id: hwEditItem.id,
+        file_id: fileId,
+      }),
+    });
+
+    const res = await r.json();
+    if (!r.ok || !res.ok) throw new Error(res?.error || "remove failed");
+
+    setHwEditFiles(res.files || []);
+  } catch (e) {
+    window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+  }
+};
+
   // ===== group input logic =====
   const requestSuggestions = async (text, currentMode) => {
     if (!text || text.trim().length < 2) {
@@ -430,6 +537,7 @@ export default function App() {
       setHwDeadline(null);
       setHwCalBaseMonth(startOfMonth(selectedDate));
       setHwOpen(true);
+      setHwFiles([]);
     } catch (e) {
       window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
     }
@@ -493,6 +601,15 @@ export default function App() {
     setHwEditItem(hw);
     setHwEditText(hw?.text || "");
     setHwEditDeadline(hw?.deadline_date ? parseFaDateString(hw.deadline_date) : null);
+
+    // NEW:
+    try {
+      const arr = JSON.parse(hw?.files_json || "[]");
+      setHwEditFiles(Array.isArray(arr) ? arr : []);
+    } catch {
+      setHwEditFiles([]);
+    }
+
     setHwEditCalBaseMonth(startOfMonth(selectedDate));
     setHwEditOpen(true);
   };
@@ -1103,7 +1220,60 @@ export default function App() {
                 onChange={(e) => setHwText(e.target.value)}
               />
 
-              <button className="hwActionRow" type="button" disabled>
+              {/* список прикреплённых файлов */}
+              {hwFiles.length > 0 && (
+                <div className="hwFilesList">
+                  {hwFiles.map((f) => (
+                    <div className="hwFileRow" key={f.id}>
+                      <div className="hwFileLeft">
+                        <img className="hwFileIcon" src="/load-file.png" alt="" />
+                        <div
+                          className="hwFileTitle"
+                          title={f.original_name || f.display_name}
+                        >
+                          {f.original_name || f.display_name}
+                        </div>
+                      </div>
+
+                      <button
+                        className="fileRemoveBtn"
+                        type="button"
+                        aria-label="remove"
+                        onClick={() => removeDraftFile(f.id)}
+                      >
+                        <span>×</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* кнопка добавления */}
+              <button
+                className="hwActionRow"
+                type="button"
+                onClick={() => {
+                  if (hwFiles.length >= 5) {
+                    window.Telegram?.WebApp?.showAlert?.("Максимум 5 файлов");
+                    return;
+                  }
+                  setPendingFor("draft");
+                  fileInputAddRef.current?.click();
+                }}
+              >
+                <input
+                  ref={fileInputAddRef}
+                  type="file"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (!f) return;
+                    setPendingFile(f);
+                    setPendingDisplayName("");
+                    setFileNameOpen(true);
+                  }}
+                />
                 <span className="hwPlus">+</span>
                 Добавить файлы (максимум 5)
               </button>
@@ -1238,9 +1408,56 @@ export default function App() {
                 value={hwEditText}
                 onChange={(e) => setHwEditText(e.target.value)}
               />
+              {/* список прикреплённых файлов */}
+              {hwEditFiles.length > 0 && (
+                <div className="hwFilesList">
+                  {hwEditFiles.map((f) => (
+                    <div className="hwFileRow" key={f.id}>
+                      <div className="hwFileLeft">
+                        <img className="hwFileIcon" src="/load-file.png" alt="" />
+                        <div className="hwFileTitle" title={f.original_name || f.display_name}>
+                          {f.original_name || f.display_name}
+                        </div>
+                      </div>
 
+                      <button
+                        className="fileRemoveBtn"
+                        type="button"
+                        aria-label="remove"
+                        onClick={() => removeHomeworkFile(f.id)}
+                      >
+                        <span>×</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               {/* файлы пока не делаем */}
-              <button className="hwActionRow" type="button" disabled>
+              <button
+                className="hwActionRow"
+                type="button"
+                onClick={() => {
+                  if (hwEditFiles.length >= 5) {
+                    window.Telegram?.WebApp?.showAlert?.("Максимум 5 файлов");
+                    return;
+                  }
+                  setPendingFor("homework");
+                  fileInputEditRef.current?.click();
+                }}
+              >
+                <input
+                  ref={fileInputEditRef}
+                  type="file"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (!f) return;
+                    setPendingFile(f);
+                    setPendingDisplayName("");
+                    setFileNameOpen(true);
+                  }}
+                />
                 <span className="hwPlus">+</span>
                 Добавить файлы (максимум 5)
               </button>
@@ -1331,6 +1548,58 @@ export default function App() {
                 </div>
               );
             })()}
+          </div>
+        )}
+
+        {fileNameOpen && pendingFile && (
+          <div className="fileFull">
+            <div className="fileContent">
+              <div className="fileTitle">Добавление файла</div>
+
+              <div className="fileCard">
+                <div className="fileRow">
+                  <div className="fileLabel">Файл</div>
+                  <div className="fileValue">{pendingFile.name}</div>
+                </div>
+                <div className="fileRow">
+                  <div className="fileLabel">Размер</div>
+                  <div className="fileValue">{Math.ceil(pendingFile.size / 1024)} KB</div>
+                </div>
+              </div>
+
+              <div className="fileSectionTitle">Короткое название</div>
+              <input
+                className="fileInput"
+                placeholder="Например: Лекция 3"
+                value={pendingDisplayName}
+                onChange={(e) => setPendingDisplayName(e.target.value)}
+              />
+
+              <div className="fileBtns">
+                <button
+                  className="hwBtn hwBtnPrimary"
+                  type="button"
+                  disabled={filesUploading}
+                  onClick={uploadPendingFile}
+                >
+                  {filesUploading ? "Загружаем..." : "Подтвердить"}
+                </button>
+
+                <button
+                  className="hwBtn hwBtnSecondary"
+                  type="button"
+                  disabled={filesUploading}
+                  onClick={() => {
+                    setFileNameOpen(false);
+                    setPendingFile(null);
+                    setPendingDisplayName("");
+                    setPendingFor(null);
+                  }}
+                >
+                  Отменить
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

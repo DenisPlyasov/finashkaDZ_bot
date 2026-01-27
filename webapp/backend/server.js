@@ -2,16 +2,63 @@ import 'dotenv/config';
 import express from 'express';
 import { validate } from '@tma.js/init-data-node';
 import Database from 'better-sqlite3';
-import { spawn } from 'node:child_process';
+import { spawn } from 'node:child_process'; 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import multer from 'multer';
 
-const app = express();
-app.use(express.json());
+
 
 // -------- helpers --------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const UPLOAD_ROOT = path.join(__dirname, 'uploads');
+ensureDir(UPLOAD_ROOT);
+
+const app = express();
+app.use(express.json());
+app.use('/files', express.static(UPLOAD_ROOT));
+
+function ensureDir(p) {
+  fs.mkdirSync(p, { recursive: true });
+}
+
+function safeSlug(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9а-яё]+/gi, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80) || 'item';
+}
+
+function safeExt(originalName) {
+  const ext = path.extname(String(originalName || '')).slice(0, 10);
+  return ext && ext.length <= 10 ? ext : '';
+}
+
+function readFilesJson(v) {
+  try {
+    const arr = JSON.parse(v || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function uniqueName(originalName) {
+  const ext = safeExt(originalName);
+  const rnd = crypto.randomBytes(8).toString('hex');
+  return `${Date.now()}_${rnd}${ext}`;
+}
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 25 * 1024 * 1024, // 25MB (подстрой)
+  },
+});
 
 function requireToken() {
   const token = process.env.BOT_TOKEN;
@@ -323,6 +370,232 @@ app.post('/api/timetable/has', async (req, res) => {
   }
 });
 
+app.post('/api/hw/draft/file/add', upload.single('file'), (req, res) => {
+  try {
+    const initData = String(req.body?.initData ?? '').trim();
+    const draft_id = Number(req.body?.draft_id);
+    const display_name = String(req.body?.display_name ?? '').trim();
+
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!draft_id) return res.status(400).json({ ok: false, error: 'draft_id required' });
+    if (!req.file) return res.status(400).json({ ok: false, error: 'file required' });
+
+    const userId = getUserIdFromInitData(initData);
+
+    const draft = db.prepare(`
+      SELECT id, telegram_user_id, target_type, target_id, target_title, pair_date, files_json
+      FROM homework_drafts
+      WHERE id = ? AND telegram_user_id = ?
+    `).get(draft_id, userId);
+
+    if (!draft) return res.status(404).json({ ok: false, error: 'Draft not found' });
+
+    const files = readFilesJson(draft.files_json);
+    if (files.length >= 5) return res.status(400).json({ ok: false, error: 'Максимум 5 файлов' });
+
+    // папка: uploads/<type>_<id>/<YYYY.MM.DD>/
+    const groupFolder = `${draft.target_type}_${draft.target_id}`;
+    const dateFolder = String(draft.pair_date || 'unknown_date');
+    const dir = path.join(UPLOAD_ROOT, groupFolder, dateFolder);
+    ensureDir(dir);
+
+    const stored_name = uniqueName(req.file.originalname);
+    const rel_path = path.join(groupFolder, dateFolder, stored_name).replaceAll('\\', '/');
+    const abs_path = path.join(UPLOAD_ROOT, rel_path);
+    fs.writeFileSync(abs_path, req.file.buffer);
+
+    const item = {
+      id: crypto.randomUUID(),
+      display_name: display_name || path.basename(req.file.originalname),
+      original_name: req.file.originalname,
+      stored_name,
+      rel_path,                 // относительный путь внутри uploads
+      mime: req.file.mimetype,
+      size: req.file.size,
+      created_at: Date.now(),
+    };
+
+    files.push(item);
+
+    db.prepare(`
+      UPDATE homework_drafts
+      SET files_json = ?, updated_at = ?
+      WHERE id = ? AND telegram_user_id = ?
+    `).run(JSON.stringify(files), Date.now(), draft_id, userId);
+
+    return res.json({ ok: true, item, files });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/hw/file/add', upload.single('file'), (req, res) => {
+  try {
+    const initData = String(req.body?.initData ?? '').trim();
+    const homework_id = Number(req.body?.homework_id);
+    const display_name = String(req.body?.display_name ?? '').trim();
+
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!homework_id) return res.status(400).json({ ok: false, error: 'homework_id required' });
+    if (!req.file) return res.status(400).json({ ok: false, error: 'file required' });
+
+    const userId = getUserIdFromInitData(initData);
+    const sel = getSelectionForUser(userId);
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+
+    const hw = db.prepare(`
+      SELECT id, target_type, target_id, pair_date, files_json
+      FROM homework
+      WHERE id = ?
+    `).get(homework_id);
+
+    if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
+
+    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+      return res.status(403).json({ ok: false, error: 'Forbidden' });
+    }
+
+    const files = readFilesJson(hw.files_json);
+    if (files.length >= 5) return res.status(400).json({ ok: false, error: 'Максимум 5 файлов' });
+
+    const groupFolder = `${hw.target_type}_${hw.target_id}`;
+    const dateFolder = String(hw.pair_date || 'unknown_date');
+    const dir = path.join(UPLOAD_ROOT, groupFolder, dateFolder);
+    ensureDir(dir);
+
+    const stored_name = uniqueName(req.file.originalname);
+    const rel_path = path.join(groupFolder, dateFolder, stored_name).replaceAll('\\', '/');
+    const abs_path = path.join(UPLOAD_ROOT, rel_path);
+    fs.writeFileSync(abs_path, req.file.buffer);
+
+    const item = {
+      id: crypto.randomUUID(),
+      display_name: display_name || path.basename(req.file.originalname),
+      original_name: req.file.originalname,
+      stored_name,
+      rel_path,
+      mime: req.file.mimetype,
+      size: req.file.size,
+      created_at: Date.now(),
+    };
+
+    files.push(item);
+
+    db.prepare(`
+      UPDATE homework
+      SET files_json = ?
+      WHERE id = ?
+    `).run(JSON.stringify(files), homework_id);
+
+    return res.json({ ok: true, item, files });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+function safeUnlink(absPath) {
+  try {
+    if (absPath && fs.existsSync(absPath)) fs.unlinkSync(absPath);
+  } catch {
+    // ignore
+  }
+}
+
+// удалить файл из draft + с диска
+app.post('/api/hw/draft/file/remove', (req, res) => {
+  try {
+    const initData = String(req.body?.initData ?? '').trim();
+    const draft_id = Number(req.body?.draft_id);
+    const file_id = String(req.body?.file_id ?? '').trim();
+
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!draft_id) return res.status(400).json({ ok: false, error: 'draft_id required' });
+    if (!file_id) return res.status(400).json({ ok: false, error: 'file_id required' });
+
+    const userId = getUserIdFromInitData(initData);
+
+    const draft = db.prepare(`
+      SELECT id, telegram_user_id, files_json
+      FROM homework_drafts
+      WHERE id = ? AND telegram_user_id = ?
+    `).get(draft_id, userId);
+
+    if (!draft) return res.status(404).json({ ok: false, error: 'Draft not found' });
+
+    const files = readFilesJson(draft.files_json);
+    const idx = files.findIndex((x) => String(x.id) === file_id);
+    if (idx === -1) return res.json({ ok: true, files }); // уже нет — ок
+
+    const [removed] = files.splice(idx, 1);
+
+    // удаляем физически
+    if (removed?.rel_path) {
+      const abs = path.join(UPLOAD_ROOT, String(removed.rel_path));
+      safeUnlink(abs);
+    }
+
+    db.prepare(`
+      UPDATE homework_drafts
+      SET files_json = ?, updated_at = ?
+      WHERE id = ? AND telegram_user_id = ?
+    `).run(JSON.stringify(files), Date.now(), draft_id, userId);
+
+    return res.json({ ok: true, files });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// удалить файл из homework + с диска
+app.post('/api/hw/file/remove', (req, res) => {
+  try {
+    const initData = String(req.body?.initData ?? '').trim();
+    const homework_id = Number(req.body?.homework_id);
+    const file_id = String(req.body?.file_id ?? '').trim();
+
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!homework_id) return res.status(400).json({ ok: false, error: 'homework_id required' });
+    if (!file_id) return res.status(400).json({ ok: false, error: 'file_id required' });
+
+    const userId = getUserIdFromInitData(initData);
+    const sel = getSelectionForUser(userId);
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+
+    const hw = db.prepare(`
+      SELECT id, target_type, target_id, files_json
+      FROM homework
+      WHERE id = ?
+    `).get(homework_id);
+
+    if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
+
+    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+      return res.status(403).json({ ok: false, error: 'Forbidden' });
+    }
+
+    const files = readFilesJson(hw.files_json);
+    const idx = files.findIndex((x) => String(x.id) === file_id);
+    if (idx === -1) return res.json({ ok: true, files });
+
+    const [removed] = files.splice(idx, 1);
+
+    if (removed?.rel_path) {
+      const abs = path.join(UPLOAD_ROOT, String(removed.rel_path));
+      safeUnlink(abs);
+    }
+
+    db.prepare(`
+      UPDATE homework
+      SET files_json = ?
+      WHERE id = ?
+    `).run(JSON.stringify(files), homework_id);
+
+    return res.json({ ok: true, files });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 app.post('/api/timetable/day', async (req, res) => {
   try {
     const { initData, date } = req.body || {};
@@ -346,7 +619,7 @@ app.post('/api/timetable/day', async (req, res) => {
 
     const items = (py.items || []).map((p) => {
       const hws = db.prepare(`
-        SELECT id, text, deadline_date
+        SELECT id, text, deadline_date, files_json
         FROM homework
         WHERE target_type = ?
           AND target_id = ?
