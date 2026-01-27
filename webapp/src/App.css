@@ -1018,3 +1018,345 @@ html, body {
   padding-right: 60px; /* место под кнопку (46px + воздух) */
 }
 
+/* ===== HW Add Screen ===== */
+.hwFull{
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: #000;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+}
+
+.hwTopBar{
+  height: 64px;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+}
+
+.hwClose{
+  border: 0;
+  background: transparent;
+  color: rgba(120,160,255,0.95);
+  font-weight: 900;
+  font-size: 18px;
+  padding: 8px 10px;
+}
+
+.hwTopTitle{
+  text-align: center;
+  font-weight: 900;
+  font-size: 18px;
+  opacity: 0.95;
+  line-height: 1.1;
+}
+
+.hwTopSub{
+  margin-top: 2px;
+  font-weight: 900;
+  font-size: 14px;
+  opacity: 0.55;
+}
+
+.hwTopRight{ width: 44px; height: 1px; }
+
+.hwContent{
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 14px 14px 18px;
+}
+
+.hwHeader{
+  text-align: center;
+  font-weight: 900;
+  font-size: 20px;
+  margin: 10px 0 12px;
+}
+
+.hwGroup{
+  text-decoration: underline;
+}
+
+.hwPairCard{
+  margin-bottom: 18px;
+
+  background: rgba(255,255,255,0.08);
+  border-radius: 18px;
+  padding: 14px 14px 12px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.45);
+}
+
+.hwPairMeta{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 900;
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.hwSquare{
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: rgba(107,92,255,0.95);
+  flex: 0 0 auto;
+}
+
+.hwPairTitle{
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 900;
+  line-height: 1.15;
+}
+
+.hwPairTeacher{
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 800;
+  opacity: 0.55;
+}
+
+.hwPairLine{
+  margin-top: 8px;
+  font-size: 16px;
+  font-weight: 900;
+  color: rgba(107,92,255,0.95);
+}
+
+.hwSectionTitle{
+  text-align: center;
+  font-size: 18px;
+  font-weight: 900;
+  margin: 6px 0 12px;
+}
+
+.hwTextarea{
+  width: 100%;
+  height: 180px;
+  resize: none;
+  border-radius: 16px;
+  padding: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.25);
+  color: rgba(255,255,255,0.92);
+  font-size: 16px;
+  outline: none;
+  margin-bottom: 12px;
+}
+
+.hwTextarea::placeholder{
+  color: rgba(255,255,255,0.35);
+  font-weight: 800;
+}
+
+.hwActionRow{
+  width: 100%;
+  border-radius: 14px;
+  padding: 14px 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: transparent;
+  color: rgba(255,255,255,0.65);
+  font-weight: 900;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.hwPlus{
+  font-size: 22px;
+  font-weight: 1000;
+  opacity: 0.85;
+}
+
+.hwBottomButtons{
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.hwBtn{
+  border: 0;
+  border-radius: 16px;
+  padding: 16px 14px;
+  font-weight: 1000;
+  font-size: 18px;
+}
+
+.hwBtnPrimary{
+  background: rgba(107,92,255,0.95);
+  color: #fff;
+}
+
+.hwBtnSecondary{
+  background: rgba(255,255,255,0.35);
+  color: rgba(255,255,255,0.95);
+}
+
+/* confirm cancel modal */
+.hwModalOverlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: grid;
+  place-items: center;
+  z-index: 1300;
+  padding: 18px;
+}
+
+.hwModal{
+  width: min(420px, 92vw);
+  background: #151515;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 18px;
+  box-shadow: 0 14px 28px rgba(0,0,0,0.75);
+  padding: 16px;
+}
+
+.hwModalText{
+  font-weight: 900;
+  font-size: 16px;
+  color: rgba(255,255,255,0.92);
+  line-height: 1.35;
+  margin-bottom: 14px;
+}
+
+.hwModalBtns{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* ===== HW under pair ===== */
+.hwList{
+  margin-top: 12px;
+  display: grid;
+  gap: 12px;
+}
+
+.hwCard{
+  background: rgba(255,255,255,0.06);
+  border-radius: 18px;
+  padding: 12px 12px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.40);
+}
+
+.hwTop{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.hwMeta{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 900;
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
+}
+
+.hwIcon{
+  width: 14px;
+  height: 14px;
+  opacity: 0.95;
+}
+
+.hwEditBtn{
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  border: 2px solid rgba(255,255,255,0.18);
+  background: transparent;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  opacity: 0.65;
+}
+
+.hwEditBtn img{
+  width: 24px;
+  height: 24px;
+  opacity: 0.9;
+}
+
+.hwTitle{
+  margin-top: 8px;
+  font-weight: 900;
+  font-size: 16px;
+  line-height: 1.15;
+}
+
+.hwDeadline{
+  margin-top: 10px;
+  font-weight: 1000;
+  font-size: 16px;
+  color: rgba(107,92,255,0.95);
+}
+
+.pairBlock{
+  display: grid;
+  gap: 12px; /* расстояние между карточкой пары и блоком задания */
+}
+
+/* чтобы hwList был именно "под парой", как отдельный блок */
+.hwList{
+  margin-top: 0;        /* раньше было 12px — теперь gap это уже даёт */
+  display: grid;
+  gap: 12px;
+}
+
+/* === Make HW card look like Pair card === */
+.hwCard{
+  background: rgba(255,255,255,0.08);          /* как у .pairCard */
+  border-radius: 18px;                         /* уже совпадает, но оставим */
+  padding: 15px 15px 12px;                     /* как у .pairCard */
+  box-shadow: 0 12px 26px rgba(0,0,0,0.45);    /* как у .pairCard */
+}
+
+/* === Pencil button border same as Plus button === */
+.hwEditBtn{
+  border: 2px solid rgba(255,255,255,0.18);    /* как у .pairAddBtn */
+  background: transparent;                     /* как у .pairAddBtn */
+  opacity: 1;                                  /* убираем “бледность” */
+}
+
+.hwEditBtn img{
+  width: 22px;
+  height: 22px;
+}
+
+/* === HW card: pencil button like plus (bottom-right) === */
+.hwCard{
+  position: relative;             /* база для absolute */
+  padding-bottom: 12px;           /* оставляем воздух снизу */
+}
+
+/* верхняя строка теперь без кнопки справа */
+.hwTop{
+  justify-content: flex-start;    /* чтобы мета не растягивалась */
+}
+
+/* кнопка карандаша — в правый низ */
+.hwEditBtn{
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  margin: 0 !important;
+  opacity: 1;
+}
+
+/* чтобы "К дедлайну" не залезало под кнопку */
+.hwDeadline{
+  padding-right: 60px;
+}

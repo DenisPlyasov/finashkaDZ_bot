@@ -21,10 +21,18 @@ function requireToken() {
 
 function getUserIdFromInitData(initData) {
   const token = requireToken();
-  validate(initData, token);
-  const params = new URLSearchParams(initData);
+
+  const init = String(initData ?? '').trim();
+  if (!init) throw new Error('initData missing or empty');
+
+  // validate() иногда кидает "The string did not match the expected pattern."
+  // если строка не того формата/пустая/с мусором.
+  validate(init, token);
+
+  const params = new URLSearchParams(init);
   const userRaw = params.get('user');
   if (!userRaw) throw new Error('No user in initData');
+
   const user = JSON.parse(userRaw);
   if (!user?.id) throw new Error('No userId in initData.user');
   return user.id;
@@ -81,6 +89,57 @@ CREATE TABLE IF NOT EXISTS user_selection_history (
 );
 CREATE INDEX IF NOT EXISTS idx_user_selection_history_user_time
   ON user_selection_history (telegram_user_id, used_at DESC);
+`);
+
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS homework (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  target_type TEXT NOT NULL,          -- 'group' | 'teacher'
+  target_id INTEGER NOT NULL,
+  target_title TEXT NOT NULL,
+
+  pair_date TEXT NOT NULL,            -- 'YYYY.MM.DD'
+  pair_title TEXT NOT NULL,
+  pair_time TEXT,
+  pair_no INTEGER,
+
+  created_by_telegram_user_id INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  deadline_date TEXT,                 -- 'YYYY.MM.DD' | NULL
+  files_json TEXT NOT NULL DEFAULT '[]',
+
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_homework_lookup
+  ON homework (target_type, target_id, pair_date);
+`);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS homework_drafts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  telegram_user_id INTEGER NOT NULL,
+
+  target_type TEXT NOT NULL,
+  target_id INTEGER NOT NULL,
+  target_title TEXT NOT NULL,
+
+  pair_date TEXT NOT NULL,
+  pair_title TEXT NOT NULL,
+  pair_time TEXT,
+  pair_no INTEGER,
+
+  text TEXT NOT NULL DEFAULT '',
+  deadline_date TEXT,
+  files_json TEXT NOT NULL DEFAULT '[]',
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_hw_drafts_user
+  ON homework_drafts (telegram_user_id, updated_at DESC);
 `);
 
 
@@ -285,15 +344,261 @@ app.post('/api/timetable/day', async (req, res) => {
     // один день
     const py = await runPython(cmd, [sel.target_id, date, date]);
 
+    const items = (py.items || []).map((p) => {
+      const hws = db.prepare(`
+        SELECT id, text, deadline_date
+        FROM homework
+        WHERE target_type = ?
+          AND target_id = ?
+          AND pair_date = ?
+          AND pair_title = ?
+          AND (pair_time IS NULL OR pair_time = ?)
+          AND (pair_no  IS NULL OR pair_no  = ?)
+        ORDER BY created_at DESC
+      `).all(
+        sel.target_type,
+        sel.target_id,
+        String(date),
+        String(p.title || ''),
+        p.time ? String(p.time) : null,
+        p.pair_no != null ? Number(p.pair_no) : null
+      );
+    
+      return { ...p, homeworks: hws };
+    });
+    
     return res.json({
       ok: true,
-      items: py.items || [],
+      items,
       count: Number(py.count || 0),
     });
+
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
+
+function getSelectionForUser(userId) {
+  return db.prepare(`
+    SELECT target_type, target_id, target_title
+    FROM user_selection
+    WHERE telegram_user_id = ?
+  `).get(userId);
+}
+
+// Создать draft (когда открыли экран добавления)
+app.post('/api/hw/draft/create', (req, res) => {
+  try {
+    const { initData, pair_date, pair_title, pair_time, pair_no } = req.body || {};
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!pair_date || !pair_title) return res.status(400).json({ ok: false, error: 'pair_date/pair_title required' });
+
+    const userId = getUserIdFromInitData(initData);
+    const sel = getSelectionForUser(userId);
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+
+    const now = Date.now();
+
+    const info = db.prepare(`
+      INSERT INTO homework_drafts (
+        telegram_user_id, target_type, target_id, target_title,
+        pair_date, pair_title, pair_time, pair_no,
+        text, deadline_date, files_json,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', NULL, '[]', ?, ?)
+    `).run(
+      userId,
+      sel.target_type, sel.target_id, sel.target_title,
+      String(pair_date), String(pair_title),
+      pair_time ? String(pair_time) : null,
+      pair_no != null ? Number(pair_no) : null,
+      now, now
+    );
+
+    return res.json({ ok: true, draft_id: Number(info.lastInsertRowid) });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// Обновить draft (текст и/или deadline)
+app.post('/api/hw/draft/update', (req, res) => {
+  try {
+    const { initData, draft_id, text, deadline_date } = req.body || {};
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!draft_id) return res.status(400).json({ ok: false, error: 'draft_id required' });
+
+    const userId = getUserIdFromInitData(initData);
+
+    const draft = db.prepare(`
+      SELECT id FROM homework_drafts
+      WHERE id = ? AND telegram_user_id = ?
+    `).get(Number(draft_id), userId);
+
+    if (!draft) return res.status(404).json({ ok: false, error: 'Draft not found' });
+
+    const now = Date.now();
+
+    // частичное обновление
+    if (typeof text === 'string') {
+      db.prepare(`UPDATE homework_drafts SET text = ?, updated_at = ? WHERE id = ? AND telegram_user_id = ?`)
+        .run(String(text), now, Number(draft_id), userId);
+    }
+
+    if (deadline_date === null || typeof deadline_date === 'string') {
+      db.prepare(`UPDATE homework_drafts SET deadline_date = ?, updated_at = ? WHERE id = ? AND telegram_user_id = ?`)
+        .run(deadline_date, now, Number(draft_id), userId);
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// Отменить draft
+app.post('/api/hw/draft/cancel', (req, res) => {
+  try {
+    const { initData, draft_id } = req.body || {};
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!draft_id) return res.status(400).json({ ok: false, error: 'draft_id required' });
+
+    const userId = getUserIdFromInitData(initData);
+
+    db.prepare(`DELETE FROM homework_drafts WHERE id = ? AND telegram_user_id = ?`)
+      .run(Number(draft_id), userId);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// Подтвердить (перенос draft -> homework)
+app.post('/api/hw/draft/submit', (req, res) => {
+  try {
+    const { initData, draft_id } = req.body || {};
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!draft_id) return res.status(400).json({ ok: false, error: 'draft_id required' });
+
+    const userId = getUserIdFromInitData(initData);
+
+    const d = db.prepare(`
+      SELECT *
+      FROM homework_drafts
+      WHERE id = ? AND telegram_user_id = ?
+    `).get(Number(draft_id), userId);
+
+    if (!d) return res.status(404).json({ ok: false, error: 'Draft not found' });
+
+    const text = String(d.text || '').trim();
+    if (!text) return res.status(400).json({ ok: false, error: 'Текст задания пустой' });
+
+    const now = Date.now();
+
+    const info = db.prepare(`
+      INSERT INTO homework (
+        target_type, target_id, target_title,
+        pair_date, pair_title, pair_time, pair_no,
+        created_by_telegram_user_id,
+        text, deadline_date, files_json,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      d.target_type, d.target_id, d.target_title,
+      d.pair_date, d.pair_title, d.pair_time, d.pair_no,
+      userId,
+      text,
+      d.deadline_date,
+      d.files_json || '[]',
+      now
+    );
+
+    db.prepare(`DELETE FROM homework_drafts WHERE id = ? AND telegram_user_id = ?`)
+      .run(Number(draft_id), userId);
+
+    return res.json({ ok: true, homework_id: Number(info.lastInsertRowid) });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ===== HW edit endpoints =====
+
+// обновить задание
+app.post('/api/hw/update', (req, res) => {
+  try {
+    const { initData, homework_id, text, deadline_date } = req.body || {};
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!homework_id) return res.status(400).json({ ok: false, error: 'homework_id required' });
+
+    const userId = getUserIdFromInitData(initData);
+    const sel = getSelectionForUser(userId);
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+
+    const hw = db.prepare(`
+      SELECT id, target_type, target_id
+      FROM homework
+      WHERE id = ?
+    `).get(Number(homework_id));
+
+    if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
+
+    // редактировать можно только в рамках текущего выбора (группа/препод)
+    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+      return res.status(403).json({ ok: false, error: 'Forbidden' });
+    }
+
+    const newText = String(text || '').trim();
+    if (!newText) return res.status(400).json({ ok: false, error: 'Текст задания пустой' });
+
+    db.prepare(`
+      UPDATE homework
+      SET text = ?, deadline_date = ?
+      WHERE id = ?
+    `).run(
+      newText,
+      deadline_date === null ? null : (deadline_date ? String(deadline_date) : null),
+      Number(homework_id)
+    );
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// удалить задание
+app.post('/api/hw/delete', (req, res) => {
+  try {
+    const { initData, homework_id } = req.body || {};
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!homework_id) return res.status(400).json({ ok: false, error: 'homework_id required' });
+
+    const userId = getUserIdFromInitData(initData);
+    const sel = getSelectionForUser(userId);
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+
+    const hw = db.prepare(`
+      SELECT id, target_type, target_id
+      FROM homework
+      WHERE id = ?
+    `).get(Number(homework_id));
+
+    if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
+
+    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+      return res.status(403).json({ ok: false, error: 'Forbidden' });
+    }
+
+    db.prepare(`DELETE FROM homework WHERE id = ?`).run(Number(homework_id));
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 app.listen(8000, () => {
   console.log('Backend listening on http://localhost:8000');
 });

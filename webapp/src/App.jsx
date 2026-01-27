@@ -97,6 +97,26 @@ function renderPairNo(n) {
   return `${n} ПАРА`;
 }
 
+function formatRuPairDateLine(d) {
+  return `${d.getDate()} ${RU_MONTH[d.getMonth()]}`;
+}
+
+function formatDeadlineRu(d) {
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yy = d.getFullYear();
+  return `${dd}.${mm}.${yy}`;
+}
+
+function parseFaDateString(s) {
+  const str = String(s || "").trim(); // "YYYY.MM.DD"
+  const m = str.match(/^(\d{4})\.(\d{2})\.(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
 export default function App() {
   const [initData, setInitData] = useState("");
   const [step, setStep] = useState("loading"); // loading | subscribe | groupGate | groupInput | schedule
@@ -134,6 +154,50 @@ export default function App() {
   // animation direction for schedule text
   const [animDir, setAnimDir] = useState(""); // "left" | "right" | ""
   const animTimerRef = useRef(null);
+
+
+  // ===== HW add flow =====
+  const [hwOpen, setHwOpen] = useState(false);
+  const [hwPair, setHwPair] = useState(null); // выбранная пара
+  const [hwDraftId, setHwDraftId] = useState(null);
+  const [hwText, setHwText] = useState("");
+  const [hwDeadline, setHwDeadline] = useState(null); // Date | null
+  const [hwCalOpen, setHwCalOpen] = useState(false);
+  const [hwCalBaseMonth, setHwCalBaseMonth] = useState(() => startOfMonth(new Date()));
+  const [hwCancelAsk, setHwCancelAsk] = useState(false);
+
+  // ===== HW edit flow =====
+  const [hwEditOpen, setHwEditOpen] = useState(false);
+  const [hwEditPair, setHwEditPair] = useState(null);     // пара, к которой относится дз
+  const [hwEditItem, setHwEditItem] = useState(null);     // само дз (id, text, deadline_date)
+  const [hwEditText, setHwEditText] = useState("");
+  const [hwEditDeadline, setHwEditDeadline] = useState(null); // Date|null
+  const [hwEditCalOpen, setHwEditCalOpen] = useState(false);
+  const [hwEditCalBaseMonth, setHwEditCalBaseMonth] = useState(() => startOfMonth(new Date()));
+
+  // универсальное подтверждение ("пуш" с 2 кнопками)
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const confirmActionRef = useRef(null);
+
+  const openConfirm = (text, onConfirm) => {
+    setConfirmText(text);
+    confirmActionRef.current = onConfirm;
+    setConfirmOpen(true);
+  };
+
+  const closeConfirm = () => {
+    setConfirmOpen(false);
+    setConfirmText("");
+    confirmActionRef.current = null;
+  };
+
+  const confirmYes = async () => {
+    const fn = confirmActionRef.current;
+    closeConfirm();
+    if (typeof fn === "function") await fn();
+  };
+
 
   // touch refs
   const touchMain = useRef(null);
@@ -340,6 +404,209 @@ export default function App() {
       else setSuggestions([]);
     } catch {
       setSuggestions([]);
+    }
+  };
+
+  const openAddHwForPair = async (pair) => {
+    try {
+      // создаём draft в БД сразу
+      const r = await fetch("/api/hw/draft/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          initData,
+          pair_date: formatFaDate(selectedDate),
+          pair_title: pair.title || "",
+          pair_time: pair.time || "",
+          pair_no: pair.pair_no ?? null,
+        }),
+      });
+      const res = await r.json();
+      if (!r.ok) throw new Error(res?.error || "draft create failed");
+
+      setHwPair(pair);
+      setHwDraftId(res.draft_id);
+      setHwText("");
+      setHwDeadline(null);
+      setHwCalBaseMonth(startOfMonth(selectedDate));
+      setHwOpen(true);
+    } catch (e) {
+      window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+    }
+  };
+
+  const cancelHwDraft = async () => {
+    try {
+      if (hwDraftId) {
+        await fetch("/api/hw/draft/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ initData, draft_id: hwDraftId }),
+        });
+      }
+    } finally {
+      setHwCancelAsk(false);
+      setHwOpen(false);
+      setHwPair(null);
+      setHwDraftId(null);
+      setHwText("");
+      setHwDeadline(null);
+      setHwCalOpen(false);
+    }
+  };
+
+  const submitHwDraft = async () => {
+    try {
+      if (!hwDraftId) return;
+
+      // сохраним текст (чтобы без лишних запросов на каждую букву)
+      await fetch("/api/hw/draft/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData, draft_id: hwDraftId, text: hwText }),
+      });
+
+      const r = await fetch("/api/hw/draft/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData, draft_id: hwDraftId }),
+      });
+      const res = await r.json();
+      if (!r.ok) throw new Error(res?.error || "submit failed");
+
+      // закрываем экран и перезагружаем день, чтобы задание появилось под парой
+      setHwOpen(false);
+      setHwPair(null);
+      setHwDraftId(null);
+      setHwText("");
+      setHwDeadline(null);
+      setHwCalOpen(false);
+
+      await fetchPairsForDate(selectedDate, initData);
+    } catch (e) {
+      window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+    }
+  };
+
+  const openEditHw = (pair, hw) => {
+    setHwEditPair(pair);
+    setHwEditItem(hw);
+    setHwEditText(hw?.text || "");
+    setHwEditDeadline(hw?.deadline_date ? parseFaDateString(hw.deadline_date) : null);
+    setHwEditCalBaseMonth(startOfMonth(selectedDate));
+    setHwEditOpen(true);
+  };
+
+  const submitHwEdit = async () => {
+    try {
+      if (!hwEditItem?.id) return;
+
+      const text = safeText(hwEditText);
+      if (!text) {
+        window.Telegram?.WebApp?.showAlert?.("Текст задания пустой");
+        return;
+      }
+
+      const r = await fetch("/api/hw/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          initData: String(initData ?? "").trim(),
+          homework_id: hwEditItem.id,
+          text,
+          deadline_date: hwEditDeadline ? formatFaDate(hwEditDeadline) : null,
+        }),
+      });
+      const res = await r.json();
+      if (!r.ok) throw new Error(res?.error || "update failed");
+
+      setHwEditOpen(false);
+      setHwEditPair(null);
+      setHwEditItem(null);
+      setHwEditText("");
+      setHwEditDeadline(null);
+      setHwEditCalOpen(false);
+
+      await fetchPairsForDate(selectedDate, initData);
+    } catch (e) {
+      window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+    }
+  };
+
+  const deleteHw = async () => {
+    try {
+      if (!hwEditItem?.id) return;
+
+      const r = await fetch("/api/hw/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          initData: String(initData ?? "").trim(),
+          homework_id: hwEditItem.id,
+        }),
+      });
+      const res = await r.json();
+      if (!r.ok) throw new Error(res?.error || "delete failed");
+
+      setHwEditOpen(false);
+      setHwEditPair(null);
+      setHwEditItem(null);
+      setHwEditText("");
+      setHwEditDeadline(null);
+      setHwEditCalOpen(false);
+
+      await fetchPairsForDate(selectedDate, initData);
+    } catch (e) {
+      window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+    }
+  };
+
+  const askCancelEdit = () => {
+    openConfirm(
+      "Вы уверены? При подтверждении отменить результаты данного действия будет невозможно.",
+      async () => {
+        setHwEditOpen(false);
+        setHwEditPair(null);
+        setHwEditItem(null);
+        setHwEditText("");
+        setHwEditDeadline(null);
+        setHwEditCalOpen(false);
+      }
+    );
+  };
+
+  const askDeleteHw = () => {
+    openConfirm(
+      "Вы уверены? При подтверждении удалить задание будет невозможно отменить.",
+      deleteHw
+    );
+  };
+
+  const pickHwEditDeadline = (d) => {
+    const next = new Date(d);
+    next.setHours(0, 0, 0, 0);
+    setHwEditDeadline(next);
+    setHwEditCalOpen(false);
+  };
+
+
+  const pickHwDeadline = async (d) => {
+    const next = new Date(d);
+    next.setHours(0, 0, 0, 0);
+    setHwDeadline(next);
+    setHwCalOpen(false);
+
+    // ВАЖНО: по ТЗ — сразу записываем в БД
+    if (hwDraftId) {
+      await fetch("/api/hw/draft/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          initData,
+          draft_id: hwDraftId,
+          deadline_date: formatFaDate(next),
+        }),
+      });
     }
   };
 
@@ -739,24 +1006,64 @@ export default function App() {
           ) : hasPairs ? (
             <div className="pairsList">
               {pairs.map((p, idx) => (
-                <div className="pairCard" key={`${p.time}-${idx}`}>
-                  <div className="pairTop">
-                    <div className="pairMeta">
-                      <img className="pairIcon" src="/pair-icon.png" alt="" />
-                      <span className="pairType">{p.type || "ПАРА"}</span>
-                      <span className="pairDot">•</span>
-                      <span className="pairNo">{p.pair_no ? `${p.pair_no} ПАРА` : "ПАРА"}</span>
+                <div className="pairBlock" key={`${p.time}-${idx}`}>
+                  <div className="pairCard">
+                    <div className="pairTop">
+                      <div className="pairMeta">
+                        <img className="pairIcon" src="/pair-icon.png" alt="" />
+                        <span className="pairType">{p.type || "ПАРА"}</span>
+                        <span className="pairDot">•</span>
+                        <span className="pairNo">{p.pair_no ? `${p.pair_no} ПАРА` : "ПАРА"}</span>
+                      </div>
+
+                      <button
+                        className="pairAddBtn"
+                        aria-label="add"
+                        type="button"
+                        onClick={() => openAddHwForPair(p)}
+                      >
+                        <img src="/add-hw-to-pair.png" alt="+" />
+                      </button>
                     </div>
 
-                    <button className="pairAddBtn" aria-label="add" type="button">
-                      <img src="/add-hw-to-pair.png" alt="+" />
-                    </button>
+                    <div className="pairTitle">{p.title || "Без названия"}</div>
+                    <div className="pairTeacher">{p.teacher || "—"}</div>
+                    <div className="pairRoom">{p.room || "—"}</div>
+                    <div className="pairTime">{p.time || ""}</div>
                   </div>
 
-                  <div className="pairTitle">{p.title || "Без названия"}</div>
-                  <div className="pairTeacher">{p.teacher || "—"}</div>
-                  <div className="pairRoom">{p.room || "—"}</div>
-                  <div className="pairTime">{p.time || ""}</div>
+                  {Array.isArray(p.homeworks) && p.homeworks.length > 0 && (
+                    <div className="hwList">
+                      {p.homeworks.map((h) => (
+                        <div className="hwCard" key={h.id}>
+                          <div className="hwTop">
+                            <div className="hwMeta">
+                              <img className="hwIcon" src="/hw-icon.png" alt="" />
+                              <span className="hwMetaText">Задание</span>
+                              <span className="hwDot">•</span>
+                              <span className="hwMetaText">{p.title || ""}</span>
+                            </div>
+                          </div>
+
+                          {/* кнопка теперь отдельно — позиционируется absolute снизу справа */}
+                          <button
+                            className="hwEditBtn"
+                            type="button"
+                            aria-label="edit"
+                            onClick={() => openEditHw(p, h)}
+                          >
+                            <img src="/edit-hw-to-pair.png" alt="edit" />
+                          </button>
+
+                          <div className="hwTitle">{h.text}</div>
+
+                          {h.deadline_date && (
+                            <div className="hwDeadline">К {h.deadline_date}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -764,6 +1071,285 @@ export default function App() {
             "На текущую дату пар не найдено"
           )}
         </div>
+
+        {hwOpen && hwPair && (
+          <div className="hwFull">
+
+            <div className="hwContent">
+              <div className="hwHeader">
+                Задание для группы <span className="hwGroup">{selection?.target_title || ""}</span>
+              </div>
+
+              <div className="hwPairCard">
+                <div className="hwPairMeta">
+                  <span className="hwSquare" />
+                  <span className="hwPairType">{(hwPair.type || "").toUpperCase() || "ПАРА"}</span>
+                  <span className="hwDot">•</span>
+                  <span className="hwPairNo">{renderPairNo(hwPair.pair_no)}</span>
+                </div>
+                <div className="hwPairTitle">{hwPair.title || "Без названия"}</div>
+                <div className="hwPairTeacher">{hwPair.teacher || "—"}</div>
+                <div className="hwPairLine">
+                  На {formatRuPairDateLine(selectedDate)} <span className="hwDot">•</span> {hwPair.time || ""}
+                </div>
+              </div>
+
+              <div className="hwSectionTitle">Добавление задания</div>
+
+              <textarea
+                className="hwTextarea"
+                placeholder="Текст задания..."
+                value={hwText}
+                onChange={(e) => setHwText(e.target.value)}
+              />
+
+              <button className="hwActionRow" type="button" disabled>
+                <span className="hwPlus">+</span>
+                Добавить файлы (максимум 5)
+              </button>
+
+              <button className="hwActionRow" type="button" onClick={() => { setHwCalBaseMonth(startOfMonth(selectedDate)); setHwCalOpen(true); }}>
+                <span className="hwPlus">+</span>
+                {hwDeadline ? `Кастомная дата дедлайна: ${formatDeadlineRu(hwDeadline)}` : "Кастомная дата дедлайна"}
+              </button>
+
+              <div className="hwBottomButtons">
+                <button className="hwBtn hwBtnPrimary" type="button" onClick={submitHwDraft}>
+                  Подтвердить
+                </button>
+                <button className="hwBtn hwBtnSecondary" type="button" onClick={() => setHwCancelAsk(true)}>
+                  Отменить
+                </button>
+              </div>
+            </div>
+
+            {hwCancelAsk && (
+              <div className="hwModalOverlay">
+                <div className="hwModal">
+                  <div className="hwModalText">
+                    Вы точно уверены что хотите отменить заполнение задания?
+                    Повторное заполнение займет много времени
+                  </div>
+                  <div className="hwModalBtns">
+                    <button className="hwBtn hwBtnPrimary" type="button" onClick={cancelHwDraft}>
+                      подтвердить
+                    </button>
+                    <button className="hwBtn hwBtnSecondary" type="button" onClick={() => setHwCancelAsk(false)}>
+                      назад
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {hwCalOpen && (() => {
+              const months = Array.from({ length: 25 }, (_, i) => addMonths(hwCalBaseMonth, i - 12));
+              return (
+                <div className="calFull">
+                  <div className="calTop">
+                    <div className="calTopLeft" />
+                    <div className="calTopTitle">Календарь</div>
+                    <button className="calTopHide" onClick={() => setHwCalOpen(false)} type="button">
+                      Скрыть
+                    </button>
+                  </div>
+
+                  <div className="calScroll">
+                    {months.map((m) => {
+                      const y = m.getFullYear();
+                      const mo = m.getMonth();
+                      const first = new Date(y, mo, 1);
+                      first.setHours(0, 0, 0, 0);
+
+                      const leading = (first.getDay() + 6) % 7;
+                      const dim = daysInMonth(first);
+                      const totalCells = Math.ceil((leading + dim) / 7) * 7;
+
+                      const cells = Array.from({ length: totalCells }, (_, idx) => {
+                        const dayNum = idx - leading + 1;
+                        if (dayNum < 1 || dayNum > dim) return null;
+                        const d = new Date(y, mo, dayNum);
+                        d.setHours(0, 0, 0, 0);
+                        return d;
+                      });
+
+                      return (
+                        <div className="calMonthBlock" key={`${y}-${mo}`}>
+                          <div className="calMonthTitle">{RU_MONTH_CAP[mo]} {y}</div>
+                          <div className="calDowRow">
+                            {RU_DOW_CAL.map((d) => <div key={d} className="calDowCell">{d}</div>)}
+                          </div>
+                          <div className="calGrid">
+                            {cells.map((d, idx) => {
+                              if (!d) return <div key={idx} className="calEmpty" />;
+                              const isSel = hwDeadline ? sameDay(d, hwDeadline) : false;
+                              return (
+                                <button
+                                  key={idx}
+                                  type="button"
+                                  className={`calDay ${isSel ? "sel" : ""}`}
+                                  onClick={() => pickHwDeadline(d)}
+                                >
+                                  {d.getDate()}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div className="calBottomPad" />
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {hwEditOpen && hwEditPair && hwEditItem && (
+          <div className="hwFull">
+
+            <div className="hwContent">
+              <div className="hwHeader">
+                Задание для группы <span className="hwGroup">{selection?.target_title || ""}</span>
+              </div>
+
+              <div className="hwPairCard">
+                <div className="hwPairMeta">
+                  <span className="hwSquare" />
+                  <span className="hwPairType">{(hwEditPair.type || "").toUpperCase() || "ПАРА"}</span>
+                  <span className="hwDot">•</span>
+                  <span className="hwPairNo">{renderPairNo(hwEditPair.pair_no)}</span>
+                </div>
+
+                <div className="hwPairTitle">{hwEditPair.title || "Без названия"}</div>
+                <div className="hwPairTeacher">{hwEditPair.teacher || "—"}</div>
+
+                <div className="hwPairLine">
+                  На {formatRuPairDateLine(selectedDate)} <span className="hwDot">•</span> {hwEditPair.time || ""}
+                </div>
+              </div>
+
+              <div className="hwSectionTitle">Редактирование задания</div>
+
+              <textarea
+                className="hwTextarea"
+                placeholder="Текст задания..."
+                value={hwEditText}
+                onChange={(e) => setHwEditText(e.target.value)}
+              />
+
+              {/* файлы пока не делаем */}
+              <button className="hwActionRow" type="button" disabled>
+                <span className="hwPlus">+</span>
+                Добавить файлы (максимум 5)
+              </button>
+
+              <button
+                className="hwActionRow"
+                type="button"
+                onClick={() => { setHwEditCalBaseMonth(startOfMonth(selectedDate)); setHwEditCalOpen(true); }}
+              >
+                <span className="hwPlus">+</span>
+                {hwEditDeadline
+                  ? `Кастомная дата дедлайна: ${formatDeadlineRu(hwEditDeadline)}`
+                  : "Кастомная дата дедлайна"}
+              </button>
+
+              <button className="hwActionRow" type="button" onClick={askDeleteHw}>
+                Удалить задание
+              </button>
+
+              <div className="hwBottomButtons">
+                <button className="hwBtn hwBtnPrimary" type="button" onClick={submitHwEdit}>
+                  Редактировать
+                </button>
+                <button className="hwBtn hwBtnSecondary" type="button" onClick={askCancelEdit}>
+                  Отменить
+                </button>
+              </div>
+            </div>
+
+            {hwEditCalOpen && (() => {
+              const months = Array.from({ length: 25 }, (_, i) => addMonths(hwEditCalBaseMonth, i - 12));
+              return (
+                <div className="calFull">
+                  <div className="calTop">
+                    <div className="calTopLeft" />
+                    <div className="calTopTitle">Календарь</div>
+                    <button className="calTopHide" onClick={() => setHwEditCalOpen(false)} type="button">
+                      Скрыть
+                    </button>
+                  </div>
+
+                  <div className="calScroll">
+                    {months.map((m) => {
+                      const y = m.getFullYear();
+                      const mo = m.getMonth();
+                      const first = new Date(y, mo, 1);
+                      first.setHours(0, 0, 0, 0);
+
+                      const leading = (first.getDay() + 6) % 7;
+                      const dim = daysInMonth(first);
+                      const totalCells = Math.ceil((leading + dim) / 7) * 7;
+
+                      const cells = Array.from({ length: totalCells }, (_, idx) => {
+                        const dayNum = idx - leading + 1;
+                        if (dayNum < 1 || dayNum > dim) return null;
+                        const d = new Date(y, mo, dayNum);
+                        d.setHours(0, 0, 0, 0);
+                        return d;
+                      });
+
+                      return (
+                        <div className="calMonthBlock" key={`${y}-${mo}`}>
+                          <div className="calMonthTitle">{RU_MONTH_CAP[mo]} {y}</div>
+                          <div className="calDowRow">
+                            {RU_DOW_CAL.map((d) => <div key={d} className="calDowCell">{d}</div>)}
+                          </div>
+                          <div className="calGrid">
+                            {cells.map((d, idx) => {
+                              if (!d) return <div key={idx} className="calEmpty" />;
+                              const isSel = hwEditDeadline ? sameDay(d, hwEditDeadline) : false;
+                              return (
+                                <button
+                                  key={idx}
+                                  type="button"
+                                  className={`calDay ${isSel ? "sel" : ""}`}
+                                  onClick={() => pickHwEditDeadline(d)}
+                                >
+                                  {d.getDate()}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div className="calBottomPad" />
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {confirmOpen && (
+          <div className="hwModalOverlay">
+            <div className="hwModal">
+              <div className="hwModalText">{confirmText}</div>
+              <div className="hwModalBtns">
+                <button className="hwBtn hwBtnPrimary" type="button" onClick={confirmYes}>
+                  Подтвердить
+                </button>
+                <button className="hwBtn hwBtnSecondary" type="button" onClick={closeConfirm}>
+                  Назад
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     );
   }
