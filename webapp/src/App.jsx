@@ -67,6 +67,8 @@ function formatFaDate(d) {
   return `${y}.${m}.${day}`;
 }
 
+
+
 function formatRuLine(d) {
   const day = d.getDate();
   const month = RU_MONTH[d.getMonth()];
@@ -115,6 +117,49 @@ function parseFaDateString(s) {
   const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   d.setHours(0, 0, 0, 0);
   return d;
+}
+
+function hasCyrillic(s) {
+  return /[А-Яа-яЁё]/.test(String(s || ""));
+}
+
+// Частый признак "UTF-8 прочитали как Latin-1/Win1252"
+function looksMojibake(s) {
+  const str = String(s || "");
+  if (!str) return false;
+  // типичные символы из кракозябр + при этом нет кириллицы
+  return !hasCyrillic(str) && /[ÐÑÃÂ]/.test(str);
+}
+
+function latin1ToUtf8(str) {
+  try {
+    const bytes = Uint8Array.from(String(str), (ch) => ch.charCodeAt(0) & 0xff);
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  } catch {
+    return String(str || "");
+  }
+}
+
+function fixFilenameEncoding(name) {
+  let s = safeText(name);
+  if (!s) return s;
+
+  // пробуем 1–2 раза (иногда бывает двойная порча)
+  for (let i = 0; i < 2; i++) {
+    if (!looksMojibake(s)) break;
+    const decoded = latin1ToUtf8(s);
+    // применяем только если стало "похоже на русский"
+    if (decoded && decoded !== s && hasCyrillic(decoded)) s = decoded;
+    else break;
+  }
+
+  return s;
+}
+
+function getNiceFileName(fileObj) {
+  // приоритет: display_name (ваше поле) -> original_name -> fallback
+  const raw = safeText(fileObj?.display_name) || safeText(fileObj?.original_name) || "file";
+  return fixFilenameEncoding(raw);
 }
 
 export default function App() {
@@ -408,7 +453,8 @@ export default function App() {
         return;
       }
 
-      const displayName = safeText(pendingDisplayName) || pendingFile.name;
+      const rawName = safeText(pendingDisplayName) || safeText(pendingFile?.name);
+      const displayName = fixFilenameEncoding(rawName) || "file";
 
       const fd = new FormData();
       fd.append("initData", init);
@@ -442,6 +488,41 @@ export default function App() {
       window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
     } finally {
       setFilesUploading(false);
+    }
+  };
+
+  const onFileClick = async ({ homework_id, file_id, displayDate }) => {
+    const tg = window.Telegram?.WebApp;
+
+    const notify = (msg) => {
+      if (tg?.showAlert) tg.showAlert(msg);
+      else alert(msg);
+    };
+
+    try {
+      const r = await fetch("/api/hw/file/send_to_chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          initData: String(initData ?? "").trim(),
+          homework_id,
+          file_id,
+          display_date: displayDate || null,
+        }),
+      });
+
+      const j = await r.json().catch(() => ({}));
+
+      if (j?.ok) {
+        const text =
+          j.toast ||
+          "Из-за ограничений на скачивание файлов в телеграмм-миниапп файл был отправлен в чат с ботом.";
+        notify(text);
+      } else {
+        notify(j?.error || "Не удалось отправить файл");
+      }
+    } catch (e) {
+      notify(String(e?.message || e));
     }
   };
 
@@ -1174,6 +1255,40 @@ const removeHomeworkFile = async (fileId) => {
 
                           <div className="hwTitle">{h.text}</div>
 
+                          {/* ✅ прикреплённые файлы — между текстом и датой */}
+                          {(() => {
+                            let files = [];
+                            try {
+                              files = JSON.parse(h?.files_json || "[]");
+                            } catch {
+                              files = [];
+                            }
+                            if (!Array.isArray(files) || files.length === 0) return null;
+
+                            return (
+                              <div className="hwAttachList">
+                                {files.map((f) => (
+                                  <button
+                                    key={f.id}
+                                    type="button"
+                                    className="hwAttachBtn"
+                                    onClick={() =>
+                                      onFileClick({
+                                        homework_id: h.id,
+                                        file_id: f.id,
+                                        displayDate: formatFaDate(selectedDate), // или null, если не надо
+                                      })
+                                    }
+                                    title={getNiceFileName(f)}
+                                  >
+                                    <img className="hwAttachIcon" src="/load-file.png" alt="" />
+                                    <span className="hwAttachName">{getNiceFileName(f)}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            );
+                          })()}
+
                           {h.deadline_date && (
                             <div className="hwDeadline">К {h.deadline_date}</div>
                           )}
@@ -1229,9 +1344,9 @@ const removeHomeworkFile = async (fileId) => {
                         <img className="hwFileIcon" src="/load-file.png" alt="" />
                         <div
                           className="hwFileTitle"
-                          title={f.original_name || f.display_name}
+                          title={getNiceFileName(f)}
                         >
-                          {f.original_name || f.display_name}
+                          {getNiceFileName(f)}
                         </div>
                       </div>
 
@@ -1415,8 +1530,8 @@ const removeHomeworkFile = async (fileId) => {
                     <div className="hwFileRow" key={f.id}>
                       <div className="hwFileLeft">
                         <img className="hwFileIcon" src="/load-file.png" alt="" />
-                        <div className="hwFileTitle" title={f.original_name || f.display_name}>
-                          {f.original_name || f.display_name}
+                        <div className="hwFileTitle" title={getNiceFileName(f)}>
+                          {getNiceFileName(f)}
                         </div>
                       </div>
 
@@ -1559,7 +1674,7 @@ const removeHomeworkFile = async (fileId) => {
               <div className="fileCard">
                 <div className="fileRow">
                   <div className="fileLabel">Файл</div>
-                  <div className="fileValue">{pendingFile.name}</div>
+                  <div className="fileValue">{fixFilenameEncoding(pendingFile.name)}</div>
                 </div>
                 <div className="fileRow">
                   <div className="fileLabel">Размер</div>

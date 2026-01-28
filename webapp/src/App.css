@@ -1507,6 +1507,8 @@ html, body {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+
+  max-width: 70vw; 
 }
 
 /* крестик "за решёткой" */
@@ -1549,4 +1551,52 @@ html, body {
 .fileRemoveBtn:active{
   transform: scale(0.98);
   opacity: 0.85;
+}
+
+/* ===== Attached file chip (как на макете) ===== */
+.hwAttachList{
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+  padding-right: 60px; /* чтобы не залезало под кнопку карандаша */
+}
+
+.hwAttachBtn{
+  width: fit-content;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  max-width: 70vw; 
+  gap: 10px;
+
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.12);
+
+  color: rgba(255,255,255,0.90);
+  font-weight: 900;
+  font-size: 14px;
+
+  cursor: pointer;
+}
+
+.hwAttachBtn:active{
+  transform: scale(0.99);
+  opacity: 0.85;
+}
+
+.hwAttachIcon{
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  opacity: 0.9;
+}
+
+.hwAttachName{
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 100%; 
 }

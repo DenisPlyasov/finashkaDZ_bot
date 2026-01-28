@@ -66,14 +66,27 @@ function requireToken() {
   return token;
 }
 
+function normalizeInitData(input) {
+  let s = String(input ?? '').trim();
+  if (!s) throw new Error('initData missing or empty');
+
+  // если initData пришёл уже url-encoded (часто при проксах/передаче)
+  if (/%3D|%26/i.test(s)) {
+    try { s = decodeURIComponent(s); } catch {}
+  }
+
+  // если где-то "плюсы" превратились в пробелы — вернём обратно
+  // (в initData пробелов быть не должно)
+  if (s.includes(' ')) s = s.replace(/ /g, '+');
+
+  return s;
+}
+
 function getUserIdFromInitData(initData) {
   const token = requireToken();
 
-  const init = String(initData ?? '').trim();
-  if (!init) throw new Error('initData missing or empty');
+  const init = normalizeInitData(initData);
 
-  // validate() иногда кидает "The string did not match the expected pattern."
-  // если строка не того формата/пустая/с мусором.
   validate(init, token);
 
   const params = new URLSearchParams(init);
@@ -199,8 +212,12 @@ app.post('/api/auth/telegram', (req, res) => {
   try {
     const { initData } = req.body || {};
     if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+
+    const init = normalizeInitData(initData);
+
     requireToken();
-    validate(initData, process.env.BOT_TOKEN);
+    validate(init, process.env.BOT_TOKEN);
+
     return res.json({ ok: true, message: 'initData is valid' });
   } catch (e) {
     return res.status(401).json({ ok: false, error: String(e?.message || e) });
@@ -501,6 +518,151 @@ function safeUnlink(absPath) {
   }
 }
 
+
+
+function safeJoinUpload(relPath) {
+  const abs = path.join(UPLOAD_ROOT, String(relPath || ""));
+  // защита от выходов из папки uploads
+  if (!abs.startsWith(UPLOAD_ROOT)) return null;
+  return abs;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildShortTelegramFilename(fileItem) {
+  const original = String(fileItem?.display_name || fileItem?.original_name || 'file').trim() || 'file';
+  const ext = safeExt(fileItem?.original_name || original);
+
+  let base = original;
+  // уберём расширение из display_name, если оно там есть
+  if (ext && base.toLowerCase().endsWith(ext.toLowerCase())) {
+    base = base.slice(0, -ext.length);
+  }
+
+  base = base.trim() || 'file';
+  // укоротим
+  if (base.length > 32) base = base.slice(0, 32).trim();
+
+  // подчищаем странные символы для имени файла (Telegram нормально, но лучше)
+  base = base.replace(/[\/\\:*?"<>|]+/g, '_');
+
+  return `${base}${ext}`;
+}
+
+async function tgSendDocumentToUser({ userId, absPath, filename, captionHtml, mime }) {
+  const token = requireToken();
+
+  const url = `https://api.telegram.org/bot${token}/sendDocument`;
+
+  const form = new FormData();
+  form.append('chat_id', String(userId));
+  form.append('caption', String(captionHtml || ''));
+  form.append('parse_mode', 'HTML');
+
+  // читаем файл (до 25MB у тебя лимит — ок)
+  const buf = fs.readFileSync(absPath);
+  const blob = new Blob([buf], { type: mime || 'application/octet-stream' });
+  form.append('document', blob, filename);
+
+  const tgRes = await fetch(url, { method: 'POST', body: form });
+  const tgData = await tgRes.json().catch(() => ({}));
+
+  if (!tgRes.ok || tgData?.ok !== true) {
+    const desc = tgData?.description || `Telegram API error (${tgRes.status})`;
+    const err = new Error(desc);
+    err.tg = tgData;
+    throw err;
+  }
+
+  return tgData;
+}
+
+function buildDownloadName(fileItem) {
+  const base = String(fileItem?.display_name || fileItem?.original_name || "file").trim() || "file";
+  const ext = safeExt(fileItem?.original_name || "");
+  if (ext && base.toLowerCase().endsWith(ext.toLowerCase())) return base;
+  return `${base}${ext}`;
+}
+
+
+app.post('/api/hw/file/send_to_chat', async (req, res) => {
+  try {
+    const initData = String(req.body?.initData ?? '').trim();
+    const homework_id = Number(req.body?.homework_id);
+    const file_id = String(req.body?.file_id ?? '').trim();
+
+    // опционально: если у тебя в UI есть кастомная дата
+    const display_date = req.body?.display_date ? String(req.body.display_date) : null;
+
+    if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+    if (!homework_id) return res.status(400).json({ ok: false, error: 'homework_id required' });
+    if (!file_id) return res.status(400).json({ ok: false, error: 'file_id required' });
+
+    const userId = getUserIdFromInitData(initData);
+
+    const sel = getSelectionForUser(userId);
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+
+    const hw = db.prepare(`
+      SELECT id, target_type, target_id, pair_title, pair_date, files_json
+      FROM homework
+      WHERE id = ?
+    `).get(homework_id);
+
+    if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
+
+    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+      return res.status(403).json({ ok: false, error: 'Forbidden' });
+    }
+
+    const files = readFilesJson(hw.files_json);
+    const file = files.find((x) => String(x.id) === file_id);
+    if (!file) return res.status(404).json({ ok: false, error: 'File not found' });
+
+    const abs = safeJoinUpload(file.rel_path);
+    if (!abs || !fs.existsSync(abs)) {
+      return res.status(404).json({ ok: false, error: 'File missing on disk' });
+    }
+
+    const dateLabel = display_date || String(hw.pair_date || '');
+    const caption = `Файл к паре «${escapeHtml(hw.pair_title || '')}» на ${escapeHtml(dateLabel)}:\n`;
+
+    const shortFilename = buildShortTelegramFilename(file);
+
+    await tgSendDocumentToUser({
+      userId,
+      absPath: abs,
+      filename: shortFilename,
+      captionHtml: caption,
+      mime: file.mime,
+    });
+
+    return res.json({
+      ok: true,
+      toast: 'Из-за ограничений на скачивание файлов в телеграмм-миниапп файл был отправлен в чат с ботом.',
+    });
+
+  } catch (e) {
+    const msg = String(e?.message || e);
+
+    // типичный кейс: пользователь не открыл чат с ботом/заблокировал
+    if (/chat not found|bot was blocked|Forbidden/i.test(msg)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Похоже, вы не открывали чат с ботом или заблокировали его. Откройте бота и нажмите /start, затем попробуйте снова.',
+      });
+    }
+
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+
 // удалить файл из draft + с диска
 app.post('/api/hw/draft/file/remove', (req, res) => {
   try {
@@ -659,6 +821,8 @@ function getSelectionForUser(userId) {
     WHERE telegram_user_id = ?
   `).get(userId);
 }
+
+
 
 // Создать draft (когда открыли экран добавления)
 app.post('/api/hw/draft/create', (req, res) => {
