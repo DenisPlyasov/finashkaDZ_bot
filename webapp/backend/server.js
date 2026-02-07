@@ -100,16 +100,17 @@ function getUserIdFromInitData(initData) {
 
 function runPython(cmd, args = []) {
   return new Promise((resolve, reject) => {
-    const script = path.join(__dirname, 'fa_bridge.py');
-    const pythonPath = path.join(__dirname, '.venv', 'bin', 'python');
-
-    const py = spawn(pythonPath, [script, cmd, ...args.map(String)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const sh = path.join(__dirname, 'fa_bridge.sh');   // <-- обёртка
+    const py = spawn(sh, [cmd, ...args.map(String)], { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let out = '';
     let err = '';
 
     py.stdout.on('data', (d) => (out += d.toString('utf-8')));
     py.stderr.on('data', (d) => (err += d.toString('utf-8')));
+
+    // ВАЖНО: ловим ошибку запуска (файл не найден/нет прав)
+    py.on('error', (e) => reject(new Error(`spawn failed: ${e.message}`)));
 
     py.on('close', (code) => {
       if (code !== 0) return reject(new Error(err || `python exit code ${code}`));
@@ -118,9 +119,10 @@ function runPython(cmd, args = []) {
         if (!json.ok) return reject(new Error(json.error || 'python error'));
         resolve(json);
       } catch (e) {
-        reject(new Error(`bad python json: ${String(e)}`));
+        reject(new Error(`bad python json: ${String(e)} | out=${out.slice(0, 200)}`));
       }
     });
+    console.log('[runPython]', sh, cmd, args);
   });
 }
 

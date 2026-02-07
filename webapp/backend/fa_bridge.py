@@ -4,6 +4,7 @@ import sys
 import os
 import re
 from typing import Optional, Tuple, List, Dict, Any
+from datetime import date
 
 from fa_api import FaAPI
 
@@ -43,6 +44,32 @@ def _hhmm_to_min(s: str) -> Optional[int]:
     if not (0 <= hh <= 23 and 0 <= mm <= 59):
         return None
     return hh * 60 + mm
+
+def _norm_date(s: str) -> str:
+    """
+    Приводит дату к формату YYYY.MM.DD.
+    Принимает YYYY.MM.DD / YYYY-MM-DD.
+    Если пусто или мусор — вернёт сегодняшнюю дату.
+    """
+    if not isinstance(s, str):
+        return date.today().strftime("%Y.%m.%d")
+    s = s.strip()
+    if not s:
+        return date.today().strftime("%Y.%m.%d")
+
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+    if m:
+        return f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+
+    m = re.match(r"^(\d{4})\.(\d{2})\.(\d{2})$", s)
+    if m:
+        return s
+
+    m = re.match(r"^(\d{4})\D(\d{1,2})\D(\d{1,2})$", s)
+    if m:
+        return f"{m.group(1)}.{int(m.group(2)):02d}.{int(m.group(3)):02d}"
+
+    return date.today().strftime("%Y.%m.%d")
 
 def _join_fio(last: str, first: str, middle: str) -> str:
     parts = [p.strip() for p in (last, first, middle) if isinstance(p, str) and p.strip()]
@@ -369,6 +396,14 @@ def main():
             return
 
         if cmd in ("timetable_group", "timetable_teacher"):
+            if len(sys.argv) < 3:
+                print(json.dumps({"ok": False, "error": "Usage: timetable_* <id> [start] [end]"}))
+                return
+
+            entity_id = int(sys.argv[2])
+
+            start = _norm_date(sys.argv[3]) if len(sys.argv) >= 4 else _norm_date("")
+            end = _norm_date(sys.argv[4]) if len(sys.argv) >= 5 else start
             if len(sys.argv) < 5:
                 print(json.dumps({"ok": False, "error": "Usage: timetable_* <id> <start> <end>"}))
                 return
