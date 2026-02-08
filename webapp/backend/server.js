@@ -101,7 +101,9 @@ function getUserIdFromInitData(initData) {
 function runPython(cmd, args = []) {
   return new Promise((resolve, reject) => {
     const sh = path.join(__dirname, 'fa_bridge.sh');   // <-- обёртка
-    const py = spawn(sh, [cmd, ...args.map(String)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const py = spawn('bash', [sh, cmd, ...args.map(String)], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
 
     let out = '';
     let err = '';
@@ -200,10 +202,27 @@ CREATE TABLE IF NOT EXISTS homework_drafts (
   updated_at INTEGER NOT NULL
 );
 
+
+
 CREATE INDEX IF NOT EXISTS idx_hw_drafts_user
   ON homework_drafts (telegram_user_id, updated_at DESC);
 `);
 
+
+function tryAlter(sql) {
+  try { db.exec(sql); } catch { /* ignore */ }
+}
+
+// миграции (добавляем колонки, если раньше их не было)
+tryAlter(`ALTER TABLE homework ADD COLUMN pair_teacher TEXT`);
+tryAlter(`ALTER TABLE homework ADD COLUMN only_for_user_id INTEGER`);
+tryAlter(`ALTER TABLE homework ADD COLUMN next_pair INTEGER`);
+
+tryAlter(`ALTER TABLE homework_drafts ADD COLUMN pair_teacher TEXT`);
+tryAlter(`ALTER TABLE homework_drafts ADD COLUMN only_for_user_id INTEGER`);
+tryAlter(`ALTER TABLE homework_drafts ADD COLUMN next_pair INTEGER`);
+tryAlter(`ALTER TABLE homework ADD COLUMN pair_type TEXT`);
+tryAlter(`ALTER TABLE homework_drafts ADD COLUMN pair_type TEXT`);
 
 // -------- existing endpoints --------
 app.get('/api/ping', (req, res) => {
@@ -263,6 +282,92 @@ app.post('/api/selection/get', (req, res) => {
       .get(userId);
 
     return res.json({ ok: true, selection: row || null });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/favorites/get', (req, res) => {
+  try {
+    const { initData } = req.body || {};
+    const userId = getUserIdFromInitData(initData);
+
+    const rows = db.prepare(`
+      SELECT group_id, group_title, created_at
+      FROM favorites
+      WHERE telegram_user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 50
+    `).all(userId);
+
+    return res.json({ ok: true, items: rows });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/favorites/toggle', async (req, res) => {
+  try {
+    const { initData } = req.body || {};
+    const userId = getUserIdFromInitData(initData);
+
+    const sel = getSelectionForUser(userId);
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+    if (sel.target_type !== 'group') return res.status(400).json({ ok: false, error: 'Only groups can be favorited' });
+
+    const gid = Number(sel.target_id);
+    const title = String(sel.target_title || '').trim() || 'Группа';
+
+    const exists = db.prepare(`
+      SELECT 1 FROM favorites WHERE telegram_user_id = ? AND group_id = ?
+    `).get(userId, gid);
+
+    if (exists) {
+      db.prepare(`DELETE FROM favorites WHERE telegram_user_id = ? AND group_id = ?`).run(userId, gid);
+      return res.json({ ok: true, favorited: false });
+    }
+
+    db.prepare(`
+      INSERT INTO favorites (telegram_user_id, group_id, group_title, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(userId, gid, title, Date.now());
+
+    // отправляем расписание в чат бота (на сегодня)
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    const dateStr = `${yyyy}.${mm}.${dd}`;
+
+    const py = await runPython('timetable_group', [gid, dateStr, dateStr]);
+    const msg = `⭐ Группа добавлена в избранное.\n\n` + formatScheduleText(py.items || [], dateStr, title);
+
+    try {
+      await tgSendMessageToUser({ userId, text: msg });
+    } catch (e) {
+      // если бот заблокирован — не ломаем добавление, просто предупреждаем
+      // (фронт покажет toast)
+      return res.json({ ok: true, favorited: true, warn: 'BOT_CHAT_UNAVAILABLE' });
+    }
+
+    return res.json({ ok: true, favorited: true });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/favorites/is', (req, res) => {
+  try {
+    const { initData } = req.body || {};
+    const userId = getUserIdFromInitData(initData);
+    const sel = getSelectionForUser(userId);
+    if (!sel || sel.target_type !== 'group') return res.json({ ok: true, favorited: false });
+
+    const row = db.prepare(`
+      SELECT 1 FROM favorites WHERE telegram_user_id = ? AND group_id = ?
+    `).get(userId, Number(sel.target_id));
+
+    return res.json({ ok: true, favorited: !!row });
   } catch (e) {
     return res.status(401).json({ ok: false, error: String(e?.message || e) });
   }
@@ -360,6 +465,18 @@ app.post('/api/selection/history', (req, res) => {
     return res.status(401).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS favorites (
+  telegram_user_id INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  group_title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (telegram_user_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fav_user_time
+  ON favorites (telegram_user_id, created_at DESC);
+`);
 
 app.post('/api/timetable/has', async (req, res) => {
   try {
@@ -585,6 +702,40 @@ async function tgSendDocumentToUser({ userId, absPath, filename, captionHtml, mi
   return tgData;
 }
 
+async function tgSendMessageToUser({ userId, text }) {
+  const token = requireToken();
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+
+  const form = new FormData();
+  form.append('chat_id', String(userId));
+  form.append('text', String(text || ''));
+  form.append('parse_mode', 'HTML');
+
+  const tgRes = await fetch(url, { method: 'POST', body: form });
+  const tgData = await tgRes.json().catch(() => ({}));
+
+  if (!tgRes.ok || tgData?.ok !== true) {
+    const desc = tgData?.description || `Telegram API error (${tgRes.status})`;
+    const err = new Error(desc);
+    err.tg = tgData;
+    throw err;
+  }
+  return tgData;
+}
+
+function formatScheduleText(items, dateStr, groupTitle) {
+  if (!items || items.length === 0) return `Расписание на ${dateStr} для «${escapeHtml(groupTitle)}»: пар не найдено.`;
+  const lines = items.map((p, i) => {
+    const t = escapeHtml(p.time || '');
+    const title = escapeHtml(p.title || '—');
+    const teacher = escapeHtml(p.teacher || '—');
+    const room = escapeHtml(p.room || '—');
+    const no = p.pair_no ? `${p.pair_no} пара` : `${i + 1} пара`;
+    return `<b>${no}</b> • ${t}\n${title}\n${teacher}\n${room}`;
+  });
+  return `<b>Расписание на ${escapeHtml(dateStr)} для «${escapeHtml(groupTitle)}»</b>\n\n` + lines.join('\n\n');
+}
+
 function buildDownloadName(fileItem) {
   const base = String(fileItem?.display_name || fileItem?.original_name || "file").trim() || "file";
   const ext = safeExt(fileItem?.original_name || "");
@@ -789,16 +940,20 @@ app.post('/api/timetable/day', async (req, res) => {
           AND target_id = ?
           AND pair_date = ?
           AND pair_title = ?
-          AND (pair_time IS NULL OR pair_time = ?)
-          AND (pair_no  IS NULL OR pair_no  = ?)
+          AND COALESCE(pair_teacher,'') = COALESCE(?, '')
+          AND COALESCE(pair_type,'')    = COALESCE(?, '')
+          AND COALESCE(pair_time,'')    = COALESCE(?, '')
+          AND (only_for_user_id IS NULL OR only_for_user_id = ?)
         ORDER BY created_at DESC
       `).all(
         sel.target_type,
         sel.target_id,
         String(date),
         String(p.title || ''),
+        p.teacher ? String(p.teacher) : null,
+        p.type ? String(p.type) : null,
         p.time ? String(p.time) : null,
-        p.pair_no != null ? Number(p.pair_no) : null
+        userId
       );
     
       return { ...p, homeworks: hws };
@@ -811,7 +966,11 @@ app.post('/api/timetable/day', async (req, res) => {
     });
 
   } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    const msg = String(e?.message || e);
+    if (/FA_TIMEOUT|timeout/i.test(msg)) {
+      return res.status(504).json({ ok: false, error: 'FA_TIMEOUT' });
+    }
+    return res.status(500).json({ ok: false, error: msg });
   }
 });
 
@@ -829,7 +988,7 @@ function getSelectionForUser(userId) {
 // Создать draft (когда открыли экран добавления)
 app.post('/api/hw/draft/create', (req, res) => {
   try {
-    const { initData, pair_date, pair_title, pair_time, pair_no } = req.body || {};
+    const { initData, pair_date, pair_title, pair_time, pair_no, pair_teacher, pair_type } = req.body || {};
     if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
     if (!pair_date || !pair_title) return res.status(400).json({ ok: false, error: 'pair_date/pair_title required' });
 
@@ -840,20 +999,23 @@ app.post('/api/hw/draft/create', (req, res) => {
     const now = Date.now();
 
     const info = db.prepare(`
-      INSERT INTO homework_drafts (
-        telegram_user_id, target_type, target_id, target_title,
-        pair_date, pair_title, pair_time, pair_no,
-        text, deadline_date, files_json,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', NULL, '[]', ?, ?)
-    `).run(
-      userId,
-      sel.target_type, sel.target_id, sel.target_title,
-      String(pair_date), String(pair_title),
-      pair_time ? String(pair_time) : null,
-      pair_no != null ? Number(pair_no) : null,
-      now, now
-    );
+    INSERT INTO homework_drafts (
+      telegram_user_id, target_type, target_id, target_title,
+      pair_date, pair_title, pair_time, pair_no, pair_teacher, pair_type,
+      only_for_user_id, next_pair,
+      text, deadline_date, files_json,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, '', NULL, '[]', ?, ?)
+  `).run(
+    userId,
+    sel.target_type, sel.target_id, sel.target_title,
+    String(pair_date), String(pair_title),
+    pair_time ? String(pair_time) : null,
+    pair_no != null ? Number(pair_no) : null,
+    pair_teacher ? String(pair_teacher) : null,
+    pair_type ? String(pair_type) : null,
+    now, now
+  );
 
     return res.json({ ok: true, draft_id: Number(info.lastInsertRowid) });
   } catch (e) {
@@ -864,7 +1026,7 @@ app.post('/api/hw/draft/create', (req, res) => {
 // Обновить draft (текст и/или deadline)
 app.post('/api/hw/draft/update', (req, res) => {
   try {
-    const { initData, draft_id, text, deadline_date } = req.body || {};
+    const { initData, draft_id, text, deadline_date, only_for_me, next_pair } = req.body || {};
     if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
     if (!draft_id) return res.status(400).json({ ok: false, error: 'draft_id required' });
 
@@ -888,6 +1050,16 @@ app.post('/api/hw/draft/update', (req, res) => {
     if (deadline_date === null || typeof deadline_date === 'string') {
       db.prepare(`UPDATE homework_drafts SET deadline_date = ?, updated_at = ? WHERE id = ? AND telegram_user_id = ?`)
         .run(deadline_date, now, Number(draft_id), userId);
+    }
+
+    if (typeof only_for_me === 'boolean') {
+      db.prepare(`UPDATE homework_drafts SET only_for_user_id = ?, updated_at = ? WHERE id = ? AND telegram_user_id = ?`)
+        .run(only_for_me ? userId : null, now, Number(draft_id), userId);
+    }
+    
+    if (typeof next_pair === 'boolean') {
+      db.prepare(`UPDATE homework_drafts SET next_pair = ?, updated_at = ? WHERE id = ? AND telegram_user_id = ?`)
+        .run(next_pair ? 1 : 0, now, Number(draft_id), userId);
     }
 
     return res.json({ ok: true });
@@ -914,8 +1086,59 @@ app.post('/api/hw/draft/cancel', (req, res) => {
   }
 });
 
+function addDaysStr(dateStr, n) {
+  const [y, m, d] = String(dateStr).split('.').map(Number);
+  const dt = new Date(y, (m || 1) - 1, d || 1);
+  dt.setDate(dt.getDate() + n);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${yy}.${mm}.${dd}`;
+}
+
+async function findNextPairForDraft(draft) {
+  // ищем в ближайшие 30 дней следующую пару по тому же предмету + teacher
+  const start = addDaysStr(draft.pair_date, 1);
+  const end = addDaysStr(draft.pair_date, 30);
+
+  const cmd = draft.target_type === 'teacher' ? 'timetable_teacher' : 'timetable_group';
+  const py = await runPython(cmd, [draft.target_id, start, end]);
+  const items = py.items || [];
+
+  const wantTitle = String(draft.pair_title || '').trim();
+  const wantTeacher = String(draft.pair_teacher || '').trim();
+  const wantType = String(draft.pair_type || '').trim();
+
+  for (const p of items) {
+    const t = String(p.title || '').trim();
+    const teach = String(p.teacher || '').trim();
+    if (!t) continue;
+
+    // title must match строго, teacher — если есть в draft
+    if (
+      t === wantTitle &&
+      (!wantTeacher || teach === wantTeacher) &&
+      (!wantType || String(p.type || '').trim() === wantType)
+    ) {
+      // НО: нам ещё нужна дата этой пары — её нет в item’ах сейчас
+      // поэтому ниже — требование: fa_bridge.py должен возвращать date в уроке (мы добавим)
+      if (p.date) {
+        return {
+          pair_date: String(p.date),
+          pair_title: String(p.title || ''),
+          pair_time: p.time ? String(p.time) : null,
+          pair_no: p.pair_no != null ? Number(p.pair_no) : null,
+          pair_teacher: p.teacher ? String(p.teacher) : null,
+          pair_type: p.type ? String(p.type) : null,
+        };
+      }
+    }
+  }
+  return null;
+}
+
 // Подтвердить (перенос draft -> homework)
-app.post('/api/hw/draft/submit', (req, res) => {
+app.post('/api/hw/draft/submit', async (req, res) => {
   try {
     const { initData, draft_id } = req.body || {};
     if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
@@ -936,21 +1159,52 @@ app.post('/api/hw/draft/submit', (req, res) => {
 
     const now = Date.now();
 
+    let finalPair = {
+      pair_date: d.pair_date,
+      pair_title: d.pair_title,
+      pair_time: d.pair_time,
+      pair_no: d.pair_no,               // хранить можно, но next_pair его игнорит
+      pair_teacher: d.pair_teacher || null,
+      pair_type: d.pair_type || null,
+    };
+
+    if (Number(d.next_pair || 0) === 1) {
+      const next = await findNextPairForDraft(d);
+      if (next) finalPair = next;
+    }
+
+    const sel = getSelectionForUser(userId);
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+
     const info = db.prepare(`
       INSERT INTO homework (
         target_type, target_id, target_title,
-        pair_date, pair_title, pair_time, pair_no,
+        pair_date, pair_title, pair_time, pair_no, pair_teacher, pair_type,
         created_by_telegram_user_id,
+        only_for_user_id, next_pair,
         text, deadline_date, files_json,
         created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      d.target_type, d.target_id, d.target_title,
-      d.pair_date, d.pair_title, d.pair_time, d.pair_no,
+      sel.target_type,
+      sel.target_id,
+      sel.target_title,
+
+      finalPair.pair_date,
+      finalPair.pair_title,
+      finalPair.pair_time,
+      finalPair.pair_no,
+      finalPair.pair_teacher,
+      finalPair.pair_type,
+
       userId,
+      d.only_for_user_id ?? null,
+      Number(d.next_pair || 0),
+
       text,
-      d.deadline_date,
-      d.files_json || '[]',
+      d.deadline_date ?? null,
+      d.files_json ?? '[]',
+
       now
     );
 
@@ -959,7 +1213,7 @@ app.post('/api/hw/draft/submit', (req, res) => {
 
     return res.json({ ok: true, homework_id: Number(info.lastInsertRowid) });
   } catch (e) {
-    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 

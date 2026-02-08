@@ -263,6 +263,13 @@ export default function App() {
 
   const canWorkInsideTelegram = useMemo(() => !!window.Telegram?.WebApp, []);
 
+  const [pairsEmptyText, setPairsEmptyText] = useState("На текущую дату пар не найдено");
+  const [isFavorite, setIsFavorite] = useState(false);
+
+  // HW flags
+  const [hwOnlyMe, setHwOnlyMe] = useState(false);
+  const [hwNextPair, setHwNextPair] = useState(false);
+
   // ===== API calls =====
   const loadHistory = async (data = initData) => {
     try {
@@ -293,13 +300,19 @@ export default function App() {
         const items = res.items || [];
         setPairs(items);
         setHasPairs(items.length > 0);
+        setPairsEmptyText("На текущую дату пар не найдено");
       } else {
         setPairs([]);
         setHasPairs(false);
+        setPairsEmptyText(res?.error === "FA_TIMEOUT"
+          ? "Время ожидания ответа от API превышено"
+          : "На текущую дату пар не найдено"
+        );
       }
     } catch {
       setPairs([]);
       setHasPairs(false);
+      setPairsEmptyText("Время ожидания ответа от API превышено");
     } finally {
       setPairsLoading(false);
     }
@@ -389,6 +402,16 @@ export default function App() {
 
         await loadHistory(data);
         await fetchPairsForDate(t, data);
+
+        try {
+          const fr = await fetch("/api/favorites/is", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ initData: data }),
+          });
+          const fj = await fr.json();
+          if (fr.ok) setIsFavorite(!!fj.favorited);
+        } catch {}
 
         setStep("schedule");
       } else {
@@ -607,6 +630,8 @@ const removeHomeworkFile = async (fileId) => {
           pair_title: pair.title || "",
           pair_time: pair.time || "",
           pair_no: pair.pair_no ?? null,
+          pair_teacher: pair.teacher || "",
+          pair_type: pair.type || "",
         }),
       });
       const res = await r.json();
@@ -615,6 +640,8 @@ const removeHomeworkFile = async (fileId) => {
       setHwPair(pair);
       setHwDraftId(res.draft_id);
       setHwText("");
+      setHwOnlyMe(false);
+      setHwNextPair(false);
       setHwDeadline(null);
       setHwCalBaseMonth(startOfMonth(selectedDate));
       setHwOpen(true);
@@ -1012,7 +1039,13 @@ const removeHomeworkFile = async (fileId) => {
 
     const wsTime = ws.getTime();
     const selTime = new Date(selectedDate).getTime();
-    const selectedIdx = Math.round((selTime - wsTime) / 86400000);
+    const dayKeyUTC = (d) => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+
+    const wsKey = dayKeyUTC(ws);
+    const selKey = dayKeyUTC(selectedDate);
+    
+    const selectedIdxRaw = Math.round((selKey - wsKey) / 86400000);
+    const selectedIdx = Math.max(0, Math.min(6, selectedIdxRaw));
 
     const onPickDay = async (i) => {
       const d = addDays(ws, i);
@@ -1048,9 +1081,40 @@ const removeHomeworkFile = async (fileId) => {
     return (
       <div className="scheduleShell">
         <div className="topBar">
-          <button className="iconBtn" aria-label="plus">
-            <img src="/hw-plus.png" alt="+" />
-          </button>
+        <button
+          className="iconBtn"
+          aria-label="favorite"
+          onClick={async () => {
+            // избранное только для групп
+            if (selection?.target_type !== "group") {
+              window.Telegram?.WebApp?.showAlert?.("Избранное доступно только для групп");
+              return;
+            }
+            try {
+              const r = await fetch("/api/favorites/toggle", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ initData }),
+              });
+              const j = await r.json();
+              if (r.ok && j.ok) {
+                setIsFavorite(!!j.favorited);
+                const msg = j.favorited ? "⭐ Группа добавлена в избранное" : "☆ Группа удалена из избранного";
+                window.Telegram?.WebApp?.showAlert?.(msg);
+
+                if (j.warn === "BOT_CHAT_UNAVAILABLE") {
+                  window.Telegram?.WebApp?.showAlert?.("Группа в избранном, но бот не смог написать в чат. Откройте бота и нажмите /start.");
+                }
+              } else {
+                window.Telegram?.WebApp?.showAlert?.(j?.error || "Не удалось изменить избранное");
+              }
+            } catch (e) {
+              window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+            }
+          }}
+        >
+          <img src={isFavorite ? "/star-filled.png" : "/star-empty.png"} alt="fav" />
+        </button>
 
           <div className="topTitle">
             <div className="topTitleMain">Расписание</div>
@@ -1173,10 +1237,6 @@ const removeHomeworkFile = async (fileId) => {
           onTouchStart={(e) => handleTouchStart(touchWeek, e)}
           onTouchEnd={(e) => handleTouchEnd(touchWeek, swipeWeek, e)}
         >
-          <div
-            className="weekIndicator"
-            style={{ "--i": selectedIdx < 0 ? 0 : selectedIdx > 6 ? 6 : selectedIdx }}
-          />
           {days.map((d, i) => {
             const isSel = i === selectedIdx;
             return (
@@ -1300,7 +1360,7 @@ const removeHomeworkFile = async (fileId) => {
               ))}
             </div>
           ) : (
-            "На текущую дату пар не найдено"
+            pairsEmptyText
           )}
         </div>
 
@@ -1334,6 +1394,45 @@ const removeHomeworkFile = async (fileId) => {
                 value={hwText}
                 onChange={(e) => setHwText(e.target.value)}
               />
+              <div className="hwChecks">
+                <label className="hwCheckRow">
+                  <input
+                    type="checkbox"
+                    checked={hwOnlyMe}
+                    onChange={async (e) => {
+                      const v = e.target.checked;
+                      setHwOnlyMe(v);
+                      if (hwDraftId) {
+                        await fetch("/api/hw/draft/update", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ initData, draft_id: hwDraftId, only_for_me: v }),
+                        });
+                      }
+                    }}
+                  />
+                  Только для меня
+                </label>
+
+                <label className="hwCheckRow">
+                  <input
+                    type="checkbox"
+                    checked={hwNextPair}
+                    onChange={async (e) => {
+                      const v = e.target.checked;
+                      setHwNextPair(v);
+                      if (hwDraftId) {
+                        await fetch("/api/hw/draft/update", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ initData, draft_id: hwDraftId, next_pair: v }),
+                        });
+                      }
+                    }}
+                  />
+                  На следующую пару
+                </label>
+              </div>
 
               {/* список прикреплённых файлов */}
               {hwFiles.length > 0 && (

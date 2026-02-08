@@ -7,7 +7,18 @@ from typing import Optional, Tuple, List, Dict, Any
 from datetime import date
 
 from fa_api import FaAPI
+import concurrent.futures as _fut
 
+FA_TIMEOUT_SEC = float(os.environ.get("FA_TIMEOUT_SEC", "8"))
+
+def _call_with_timeout(fn, *args, timeout: float = FA_TIMEOUT_SEC, **kwargs):
+    with _fut.ThreadPoolExecutor(max_workers=1) as ex:
+        f = ex.submit(fn, *args, **kwargs)
+        try:
+            return f.result(timeout=timeout)
+        except _fut.TimeoutError:
+            raise TimeoutError("FA_TIMEOUT")
+        
 # ===== Rings (как в боте) =====
 _RINGS_DEFAULT = ["08:30", "10:10", "11:50", "14:00", "15:40", "17:25", "18:55", "20:30"]
 
@@ -368,6 +379,7 @@ def _normalize_lesson(lesson: dict) -> Dict[str, Any]:
         "teacher": _get_teacher_full(lesson),
         "room": _extract_room(lesson),
         "time": time_range,
+        "date": _norm_date(_first_str(lesson.get("date"), lesson.get("day"), lesson.get("lesson_date"), "")),
     }
 
 # ---------- CLI ----------
@@ -387,9 +399,9 @@ def main():
             query = " ".join(sys.argv[2:]).strip()
 
             if cmd == "search_group":
-                items = fa.search_group(query) or []
+                items = _call_with_timeout(fa.search_group, query) or []
             else:
-                items = fa.search_teacher(query) or []
+                items = _call_with_timeout(fa.search_teacher, query) or []
 
             out = [{"id": it.get("id"), "title": it.get("label") or it.get("name") or it.get("title") or ""} for it in items]
             print(json.dumps({"ok": True, "items": out}, ensure_ascii=False))
@@ -413,19 +425,27 @@ def main():
             end = sys.argv[4]
 
             if cmd == "timetable_group":
-                raw = fa.timetable_group(entity_id, start, end)
+                raw = _call_with_timeout(fa.timetable_group, entity_id, start, end)
             else:
-                raw = fa.timetable_teacher(entity_id, start, end)
+                raw = _call_with_timeout(fa.timetable_teacher, entity_id, start, end)
 
             # raw может быть dict по датам или list
             lessons: List[dict] = []
             if isinstance(raw, list):
-                lessons = [x for x in raw if isinstance(x, dict)]
+                for x in raw:
+                    if isinstance(x, dict):
+                        x = dict(x)
+                        # если нет даты — хотя бы start
+                        x.setdefault("date", start)
+                        lessons.append(x)
             elif isinstance(raw, dict) and raw:
-                # может быть несколько дат — соберём всё
-                for v in raw.values():
+                for k, v in raw.items():
                     if isinstance(v, list):
-                        lessons.extend([x for x in v if isinstance(x, dict)])
+                        for x in v:
+                            if isinstance(x, dict):
+                                x = dict(x)
+                                x["date"] = _norm_date(str(k))
+                                lessons.append(x)
 
             items = [_normalize_lesson(les) for les in lessons]
 

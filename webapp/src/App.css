@@ -381,12 +381,35 @@ html, body, #root {
 } */
 
 .weekRow {
-  position: relative;              /* ✅ нужно для индикатора */
+  /* общие переменные в одном месте */
+  --gap: 10px;
+  --pad: 2px;
+
+  position: relative;
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  gap: 10px;
-  margin-top: 18px;
-  padding: 0 2px;
+  gap: var(--gap);
+  padding: 0 var(--pad);
+}
+
+.weekIndicator {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #fff;
+  border-radius: 14px;
+  z-index: 0;
+  pointer-events: none;
+
+  /* ВАЖНО: вычитаем padding слева+справа */
+  --cell: calc((100% - (var(--gap) * 6) - (var(--pad) * 2)) / 7);
+
+  width: var(--cell);
+  left: var(--pad);
+
+  transform: translateX(calc((var(--cell) + var(--gap)) * var(--i)));
+  transition: transform 220ms cubic-bezier(.22, 1, .36, 1);
+  will-change: transform;
 }
 
 /* .dayCell {
@@ -426,7 +449,7 @@ html, body, #root {
 }
 
 
-.weekIndicator {
+/* .weekIndicator {
   position: absolute;
   top: 0;
   height: 100%;
@@ -435,17 +458,15 @@ html, body, #root {
   z-index: 0;
   will-change: left;
 
-  /* точная ширина одной колонки (с учётом округлений браузера) */
   --gap: 10px;
   --pad: 2px;
   --cell: calc((100% - (var(--gap) * 6)) / 7);
 
   width: calc(var(--cell) - 0px);
 
-  /* ✅ позиционируем через left, а не через translateX(100%) */
   left: calc(var(--pad) + (var(--cell) + var(--gap)) * var(--i));
   transition: left 220ms cubic-bezier(.22, 1, .36, 1);
-}
+} */
 
 
 /* .dayCell.selected {
@@ -1295,6 +1316,8 @@ html, body {
   font-weight: 900;
   font-size: 16px;
   line-height: 1.15;
+  padding-right: 60px; /* место под кнопку редактирования */
+  word-break: break-word;
 }
 
 .hwDeadline{
@@ -1599,4 +1622,70 @@ html, body {
   white-space: nowrap;
   text-overflow: ellipsis;
   max-width: 100%; 
+}
+
+.hwChecks{
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 14px;
+  text-align: left;
+}
+
+.hwCheckRow{
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-weight: 900;
+  color: rgba(255,255,255,0.85);
+}
+
+.hwCheckRow input{
+  width: 18px;
+  height: 18px;
+}
+
+
+.weekRow{
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+  padding: 0 2px;
+}
+
+.dayCell{
+  border: 0;
+  background: transparent;
+  border-radius: 14px;
+  padding: 10px 0 8px;
+  cursor: pointer;
+  text-align: center;
+
+  position: relative;
+  isolation: isolate; /* важно для ::before */
+  color: rgba(255,255,255,0.55);
+}
+
+/* сама белая плашка */
+.dayCell::before{
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  background: transparent;
+  z-index: -1;
+  transition: background 220ms cubic-bezier(.22, 1, .36, 1);
+}
+
+.dayCell.selected{
+  color: #000;
+}
+
+.dayCell.selected::before{
+  background: #fff;
+}
+
+.dayCell.selected .dayDow{
+  color: #000;
+  opacity: 1;
 }
