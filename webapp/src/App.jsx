@@ -16,7 +16,25 @@ const RU_MONTH_CAP = [
   "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
   "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
 ];
+const WEEK_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const RU_WEEK = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 
+const defaultWeekdays = ["mon", "tue", "wed", "thu", "fri", "sat"]; // ПН-СБ
+
+const makeId = () => `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+const uid = makeId;
+const DEFAULT_NOTIFY_WEEKDAYS = ["mon","tue","wed","thu","fri","sat"];
+
+const withIds = (rules) => {
+  const arr = Array.isArray(rules) ? rules : [];
+  return arr.map((r) => ({
+    id: r?.id || makeId(),
+    time: String(r?.time || "19:00"),
+    day: r?.day === "today" ? "today" : "tomorrow",
+  }));
+};
+
+const clamp2digits = (v) => String(v || "").replace(/\D+/g, "").slice(0, 2);
 function startOfWeekMonday(d) {
   const x = new Date(d);
   const day = x.getDay(); // 0 Sun .. 6 Sat
@@ -161,6 +179,60 @@ function getNiceFileName(fileObj) {
   const raw = safeText(fileObj?.display_name) || safeText(fileObj?.original_name) || "file";
   return fixFilenameEncoding(raw);
 }
+function clampHHMM(value) {
+  // оставляем только цифры и двоеточие; автоподстановка ":" после HH
+  const raw = String(value ?? "").replace(/[^\d:]/g, "");
+  const digits = raw.replace(/:/g, "").slice(0, 4); // максимум HHMM
+
+  const hh = digits.slice(0, 2);
+  const mm = digits.slice(2, 4);
+
+  if (digits.length <= 2) return hh;         // "1" / "19"
+  return `${hh}:${mm}`;                      // "19:0" / "19:00"
+}
+
+function normalizeToValidHHMM(value) {
+  // на blur приводим к HH:MM и зажимаем в 00-23 / 00-59
+  const s = String(value ?? "");
+  const digits = s.replace(/\D/g, "").slice(0, 4);
+
+  let hh = digits.slice(0, 2);
+  let mm = digits.slice(2, 4);
+
+  if (hh.length < 2) hh = hh.padEnd(2, "0");
+  if (mm.length < 2) mm = mm.padEnd(2, "0");
+
+  let h = Number(hh);
+  let m = Number(mm);
+
+  if (Number.isNaN(h)) h = 0;
+  if (Number.isNaN(m)) m = 0;
+
+  h = Math.max(0, Math.min(23, h));
+  m = Math.max(0, Math.min(59, m));
+
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function TimeHHMMInput({ value, onChange, className = "" }) {
+  return (
+    <input
+      className={`timeInput ${className}`}
+      inputMode="numeric"
+      placeholder="19:00"
+      value={value}
+      onChange={(e) => {
+        const next = clampHHMM(e.target.value);
+        onChange?.(next);
+      }}
+      onBlur={() => {
+        const fixed = normalizeToValidHHMM(value);
+        if (fixed !== value) onChange?.(fixed);
+      }}
+      maxLength={5}
+    />
+  );
+}
 
 export default function App() {
   const [initData, setInitData] = useState("");
@@ -266,6 +338,10 @@ export default function App() {
   const [pairsEmptyText, setPairsEmptyText] = useState("На текущую дату пар не найдено");
   const [isFavorite, setIsFavorite] = useState(false);
 
+  const [notifyOpen, setNotifyOpen] = useState(false);
+  const [notifyRules, setNotifyRules] = useState([{ id: uid(), time: "19:00", day: "tomorrow" }]);
+  const [notifyWeekdays, setNotifyWeekdays] = useState(DEFAULT_NOTIFY_WEEKDAYS);
+
   // HW flags
   const [hwOnlyMe, setHwOnlyMe] = useState(false);
   const [hwNextPair, setHwNextPair] = useState(false);
@@ -282,6 +358,89 @@ export default function App() {
       if (r.ok) setHistory(res.items || []);
     } catch {
       // ignore
+    }
+  };
+
+  const loadNotifySettings = async () => {
+    try {
+      const r = await fetch("/api/notify/get", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData }),
+      });
+      const j = await r.json();
+      if (r.ok && j.ok && j.settings) {
+        // ✅ weekdays (ПН–СБ по умолчанию)
+        if (Array.isArray(j.settings.weekdays) && j.settings.weekdays.length > 0) {
+          setNotifyWeekdays(j.settings.weekdays);
+        } else {
+          setNotifyWeekdays(DEFAULT_NOTIFY_WEEKDAYS);
+        }
+      
+        // ✅ правила с устойчивыми id (иначе фокус будет слетать)
+        if (Array.isArray(j.settings.rules) && j.settings.rules.length > 0) {
+          setNotifyRules(j.settings.rules.map(x => ({ id: uid(), time: x.time, day: x.day })));
+        } else {
+          // fallback со старых полей
+          const times = Array.isArray(j.settings.times) ? j.settings.times : ["19:00"];
+          const days = Array.isArray(j.settings.days) ? j.settings.days : ["tomorrow"];
+      
+          const day = days.includes("today") ? "today" : "tomorrow";
+          setNotifyRules(times.map(t => ({ id: uid(), time: t, day })));
+        }
+      } else {
+        setNotifyWeekdays(DEFAULT_NOTIFY_WEEKDAYS);
+        setNotifyRules([{ id: uid(), time: "19:00", day: "tomorrow" }]);
+      }
+    } catch {}
+  };
+  
+  const saveNotifySettings = async () => {
+    const r = await fetch("/api/notify/set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        initData,
+        rules: notifyRules.map(({ id, ...rest }) => rest),
+        weekdays: notifyWeekdays,
+      }),
+    });
+    const j = await r.json().catch(()=> ({}));
+    if (!r.ok || !j.ok) throw new Error(j?.error || "Не удалось сохранить настройки");
+  };
+
+  const refreshFavoriteState = async () => {
+    // если выбран не group — избранного/настроек быть не должно
+    if (selection?.target_type !== "group") {
+      setIsFavorite(false);
+      setNotifyOpen(false);
+      return;
+    }
+
+    try {
+      const fr = await fetch("/api/favorites/is", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData }),
+      });
+      const fj = await fr.json();
+
+      if (fr.ok && fj?.ok) {
+        const fav = !!fj.favorited;
+        setIsFavorite(fav);
+
+        // если не фаворит — закрываем настройки и не показываем шестерёнку
+        if (!fav) {
+          setNotifyOpen(false);
+        } else {
+          // если фаворит — подтягиваем настройки (чтобы UI был актуален)
+          await loadNotifySettings();
+        }
+      }
+    } catch {
+      // если сеть упала — лучше не показывать настройки
+      setIsFavorite(false);
+      setNotifyOpen(false);
     }
   };
 
@@ -348,6 +507,15 @@ export default function App() {
     });
   }, [calendarOpen, calendarBaseMonth]);
 
+  useEffect(() => {
+    if (step !== "schedule") return;
+    if (!initData) return;
+    if (!selection) return;
+
+    refreshFavoriteState();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection?.target_type, selection?.target_id, step, initData]);
+
   // ===== subscription gate =====
   const autoCheckSubscription = async (data) => {
     setStep("loading");
@@ -410,7 +578,11 @@ export default function App() {
             body: JSON.stringify({ initData: data }),
           });
           const fj = await fr.json();
-          if (fr.ok) setIsFavorite(!!fj.favorited);
+          if (fr.ok && fj?.ok) {
+            const fav = !!fj.favorited;
+            setIsFavorite(fav);
+            if (fav) await loadNotifySettings();
+          }
         } catch {}
 
         setStep("schedule");
@@ -997,6 +1169,7 @@ const removeHomeworkFile = async (fileId) => {
       setSelectedDate(t);
       setWeekStart(startOfWeekMonday(t));
       await fetchPairsForDate(t, initData);
+      await refreshFavoriteState();
     } catch {
       // ignore
     } finally {
@@ -1081,40 +1254,57 @@ const removeHomeworkFile = async (fileId) => {
     return (
       <div className="scheduleShell">
         <div className="topBar">
-        <button
-          className="iconBtn"
-          aria-label="favorite"
-          onClick={async () => {
-            // избранное только для групп
-            if (selection?.target_type !== "group") {
-              window.Telegram?.WebApp?.showAlert?.("Избранное доступно только для групп");
-              return;
-            }
-            try {
-              const r = await fetch("/api/favorites/toggle", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ initData }),
-              });
-              const j = await r.json();
-              if (r.ok && j.ok) {
-                setIsFavorite(!!j.favorited);
-                const msg = j.favorited ? "⭐ Группа добавлена в избранное" : "☆ Группа удалена из избранного";
-                window.Telegram?.WebApp?.showAlert?.(msg);
-
-                if (j.warn === "BOT_CHAT_UNAVAILABLE") {
-                  window.Telegram?.WebApp?.showAlert?.("Группа в избранном, но бот не смог написать в чат. Откройте бота и нажмите /start.");
+          <div className="topLeftActions">
+            <button
+              className="iconBtn"
+              aria-label="favorite"
+              onClick={async () => {
+                // избранное только для групп
+                if (selection?.target_type !== "group") {
+                  window.Telegram?.WebApp?.showAlert?.("Избранное доступно только для групп");
+                  return;
                 }
-              } else {
-                window.Telegram?.WebApp?.showAlert?.(j?.error || "Не удалось изменить избранное");
-              }
-            } catch (e) {
-              window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
-            }
-          }}
-        >
-          <img src={isFavorite ? "/star-filled.png" : "/star-empty.png"} alt="fav" />
-        </button>
+                try {
+                  const r = await fetch("/api/favorites/toggle", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ initData }),
+                  });
+                  const j = await r.json();
+                  if (r.ok && j.ok) {
+                    const fav = !!j.favorited;
+                    setIsFavorite(fav);
+                  
+                    const msg = fav
+                      ? "Группа добавлена в избранное, отредактировать время получения уведомлений можно в настройках рядом с избранным"
+                      : "☆ Группа удалена из избранного";
+                    window.Telegram?.WebApp?.showAlert?.(msg);
+                  
+                    if (fav) await loadNotifySettings();
+                  } else {
+                    window.Telegram?.WebApp?.showAlert?.(j?.error || "Не удалось изменить избранное");
+                  }
+                } catch (e) {
+                  window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+                }
+              }}
+            >
+              <img src={isFavorite ? "/star-filled.png" : "/star-empty.png"} alt="fav" />
+            </button>
+
+            {selection?.target_type === "group" && isFavorite && (
+              <button
+                className="iconBtn"
+                aria-label="settings"
+                onClick={async () => {
+                  await loadNotifySettings();
+                  setNotifyOpen(true);
+                }}
+              >
+                <img src="/settings-icon.png" alt="settings" />
+              </button>
+            )}
+          </div>
 
           <div className="topTitle">
             <div className="topTitleMain">Расписание</div>
@@ -1833,6 +2023,164 @@ const removeHomeworkFile = async (fileId) => {
           </div>
         )}
 
+        {notifyOpen && (
+          <div className="notifyFull">
+            <div className="notifyContent">
+              <div className="notifyTitle">Настройки</div>
+
+              <div className="notifyCard">
+                <div className="notifyCardTitle">Уведомления</div>
+                <div className="notifyCardSub">
+                  Добавьте любое количество времен. Для каждого времени выберите: расписание на сегодня или на завтра.
+                </div>
+
+                <div className="notifyRules">
+                {notifyRules.map((r, idx) => (
+                  <div className="notifyRuleRow" key={r.id}>
+                    <TimeHHMMInput
+                      value={r.time}
+                      onChange={(nextTime) => {
+                        setNotifyRules(prev => prev.map((x, i) => i === idx ? { ...x, time: nextTime } : x));
+                      }}
+                    />
+
+                    <button
+                      type="button"
+                      className={`pill ${r.day === "today" ? "on" : ""}`}
+                      onClick={() => setNotifyRules(prev => prev.map((x, i) => i === idx ? { ...x, day: "today" } : x))}
+                    >
+                      сегодня
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`pill ${r.day === "tomorrow" ? "on" : ""}`}
+                      onClick={() => setNotifyRules(prev => prev.map((x, i) => i === idx ? { ...x, day: "tomorrow" } : x))}
+                    >
+                      завтра
+                    </button>
+
+                    <button
+                      type="button"
+                      className="notifyRemoveRule"
+                      onClick={() => setNotifyRules(prev => prev.filter((_, i) => i !== idx))}
+                      aria-label="remove"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                </div>
+
+                <button
+                  className="notifyAddRuleBtn"
+                  type="button"
+                  onClick={() =>
+                    setNotifyRules((prev) => [...prev, { id: makeId(), time: "19:00", day: "tomorrow" }])
+                  }
+                >
+                  + Добавить время
+                </button>
+              </div>
+
+              <div className="notifyCard">
+                <div className="notifyCardTitle">Выбор дня</div>
+                <div className="notifyCardSub">
+                  Выберите, в какие дни вы хотите получать уведомления с расписанием избранных групп
+                </div>
+                <div className="notifyPills" style={{ marginTop: 12 }}>
+                  {WEEK_KEYS.map((k, i) => {
+                    const on = notifyWeekdays.includes(k);
+                    return (
+                      <button
+                        key={k}
+                        type="button"
+                        className={`pill ${on ? "on" : ""}`}
+                        onClick={() => {
+                          setNotifyWeekdays((prev) => {
+                            const has = prev.includes(k);
+                            const next = has ? prev.filter((x) => x !== k) : [...prev, k];
+                            // хотя бы один день должен остаться
+                            return next.length ? next : prev;
+                          });
+                        }}
+                      >
+                        {RU_WEEK[i]}
+                      </button>
+                    );
+                  })}
+                </div>
+                </div>
+              </div>
+
+              <div className="notifyCard">
+                <div className="notifyCardTitle">Отключение уведомлений</div>
+                <div className="notifyCardSub">
+                  Нажав кнопку ниже вы отключите уведомления с расписанием в боте. Включить - добавив группу в избранное
+                </div>
+
+                <button
+                  className="notifyDangerBtn"
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await fetch("/api/notify/disable", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ initData }),
+                      });
+                      setNotifyOpen(false);
+                      setIsFavorite(false);
+                      setNotifyRules([{ id: uid(), time: "19:00", day: "tomorrow" }]);
+                      setNotifyWeekdays(DEFAULT_NOTIFY_WEEKDAYS);
+                      window.Telegram?.WebApp?.showAlert?.("Уведомления отключены. Группа удалена из избранного.");
+                    } catch {}
+                  }}
+                >
+                  Отключить
+                </button>
+              </div>
+
+              <button
+                className="notifySaveBtn"
+                type="button"
+                onClick={async () => {
+                  try {
+                    const isValidHHMM = (s) => /^\d{2}:\d{2}$/.test(String(s||"")) &&
+                    Number(s.slice(0,2)) >= 0 && Number(s.slice(0,2)) <= 23 &&
+                    Number(s.slice(3,5)) >= 0 && Number(s.slice(3,5)) <= 59;
+                  
+                  if (!notifyRules.length) {
+                    window.Telegram?.WebApp?.showAlert?.("Добавьте хотя бы одно время");
+                    return;
+                  }
+                  
+                  for (const r of notifyRules) {
+                    if (!isValidHHMM(r.time)) {
+                      window.Telegram?.WebApp?.showAlert?.(`Некорректное время: ${r.time}. Формат HH:MM`);
+                      return;
+                    }
+                    if (r.day !== "today" && r.day !== "tomorrow") {
+                      window.Telegram?.WebApp?.showAlert?.("Выберите 'сегодня' или 'завтра' для каждого времени");
+                      return;
+                    }
+                  }
+                  if (!Array.isArray(notifyWeekdays) || notifyWeekdays.length === 0) {
+                    window.Telegram?.WebApp?.showAlert?.("Выберите хотя бы один день недели");
+                    return;
+                  }
+                    await saveNotifySettings();
+                    setNotifyOpen(false);
+                  } catch (e) {
+                    window.Telegram?.WebApp?.showAlert?.(String(e?.message || e));
+                  }
+                }}
+              >
+                Сохранить и выйти
+              </button>
+            
+          </div>
+        )}
       </div>
     );
   }

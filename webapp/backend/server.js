@@ -82,6 +82,8 @@ function normalizeInitData(input) {
   return s;
 }
 
+
+
 function getUserIdFromInitData(initData) {
   const token = requireToken();
 
@@ -139,6 +141,43 @@ CREATE TABLE IF NOT EXISTS user_selection (
   target_id INTEGER NOT NULL,
   target_title TEXT NOT NULL,
   updated_at INTEGER NOT NULL
+);
+`);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS favorites (
+  telegram_user_id INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  group_title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (telegram_user_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fav_user_time
+  ON favorites (telegram_user_id, created_at DESC);
+`);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS notify_settings (
+  telegram_user_id INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  group_title TEXT NOT NULL,
+  times_json TEXT NOT NULL DEFAULT '["19:00"]',
+  days_json  TEXT NOT NULL DEFAULT '["tomorrow"]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL,
+  last_error_at INTEGER,
+  last_error_text TEXT,
+  PRIMARY KEY (telegram_user_id, group_id)
+);
+
+CREATE TABLE IF NOT EXISTS notify_log (
+  telegram_user_id INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  day_type TEXT NOT NULL,      -- today/tomorrow
+  schedule_date TEXT NOT NULL, -- YYYY.MM.DD
+  hhmm TEXT NOT NULL,          -- HH:MM
+  sent_at INTEGER NOT NULL,
+  PRIMARY KEY (telegram_user_id, group_id, day_type, schedule_date, hhmm)
 );
 `);
 
@@ -223,6 +262,8 @@ tryAlter(`ALTER TABLE homework_drafts ADD COLUMN only_for_user_id INTEGER`);
 tryAlter(`ALTER TABLE homework_drafts ADD COLUMN next_pair INTEGER`);
 tryAlter(`ALTER TABLE homework ADD COLUMN pair_type TEXT`);
 tryAlter(`ALTER TABLE homework_drafts ADD COLUMN pair_type TEXT`);
+tryAlter(`ALTER TABLE notify_settings ADD COLUMN rules_json TEXT`);
+tryAlter(`ALTER TABLE notify_settings ADD COLUMN weekdays_json TEXT`);
 
 // -------- existing endpoints --------
 app.get('/api/ping', (req, res) => {
@@ -306,6 +347,196 @@ app.post('/api/favorites/get', (req, res) => {
   }
 });
 
+app.post('/api/notify/get', (req, res) => {
+  try {
+    const { initData } = req.body || {};
+    const userId = getUserIdFromInitData(initData);
+
+    const sel = getSelectionForUser(userId);
+    if (!sel || sel.target_type !== 'group') return res.json({ ok: true, settings: null });
+
+    const row = db.prepare(`
+      SELECT group_id, group_title, times_json, days_json, rules_json, weekdays_json, enabled
+      FROM notify_settings
+      WHERE telegram_user_id = ? AND group_id = ?
+    `).get(userId, Number(sel.target_id));
+
+    if (!row) return res.json({ ok: true, settings: null });
+
+    let rules = null;
+    try { rules = row.rules_json ? JSON.parse(row.rules_json) : null; } catch { rules = null; }
+    
+    let weekdays = null;
+    try { weekdays = row.weekdays_json ? JSON.parse(row.weekdays_json) : null; } catch { weekdays = null; }
+    
+    return res.json({
+      ok: true,
+      settings: {
+        group_id: row.group_id,
+        group_title: row.group_title,
+        enabled: !!row.enabled,
+    
+        rules: Array.isArray(rules) ? rules : null,
+        weekdays: Array.isArray(weekdays) && weekdays.length > 0 ? weekdays : null,
+    
+        times: JSON.parse(row.times_json || '["19:00"]'),
+        days: JSON.parse(row.days_json || '["tomorrow"]'),
+      }
+    });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+function isValidHHMM(s) {
+  return /^\d{2}:\d{2}$/.test(String(s || "")) &&
+    Number(s.slice(0,2)) >= 0 && Number(s.slice(0,2)) <= 23 &&
+    Number(s.slice(3,5)) >= 0 && Number(s.slice(3,5)) <= 59;
+}
+
+function isValidDayType(x) {
+  return x === "today" || x === "tomorrow";
+}
+
+function normalizeRules(rules) {
+  if (!Array.isArray(rules)) return [];
+
+  const out = [];
+  for (const r of rules) {
+    const time = String(r?.time || "").trim();
+    const day = String(r?.day || "").trim();
+
+    if (!isValidHHMM(time)) continue;
+    if (!isValidDayType(day)) continue;
+
+    // уникальность по (time, day)
+    if (!out.find(x => x.time === time && x.day === day)) {
+      out.push({ time, day });
+    }
+  }
+
+  // сортировка по времени
+  out.sort((a, b) => a.time.localeCompare(b.time));
+  return out;
+}
+
+function buildRulesFromLegacy(times, days) {
+  const t = Array.isArray(times) ? times.map(String).filter(isValidHHMM) : [];
+  const d = Array.isArray(days) ? days.map(String).filter(isValidDayType) : [];
+  const out = [];
+  for (const time of t) {
+    for (const day of d) out.push({ time, day });
+  }
+  return normalizeRules(out);
+}
+
+app.post('/api/notify/set', (req, res) => {
+  try {
+    const { initData, times, days, rules, weekdays } = req.body || {};
+    const userId = getUserIdFromInitData(initData);
+
+    const sel = getSelectionForUser(userId);
+    if (!sel || sel.target_type !== 'group') {
+      return res.status(400).json({ ok: false, error: 'Only groups can have notifications' });
+    }
+
+    const gid = Number(sel.target_id);
+    const title = String(sel.target_title || '').trim() || 'Группа';
+
+    // проверим, что группа реально в избранном
+    const fav = db.prepare(`SELECT 1 FROM favorites WHERE telegram_user_id=? AND group_id=?`).get(userId, gid);
+    if (!fav) return res.status(400).json({ ok: false, error: 'Group is not favorited' });
+    const WEEK_KEYS = ["mon","tue","wed","thu","fri","sat","sun"];
+    const DEFAULT_WEEKDAYS = ["mon","tue","wed","thu","fri","sat"];
+
+    function normalizeWeekdays(arr) {
+      if (!Array.isArray(arr)) return DEFAULT_WEEKDAYS;
+      const set = new Set();
+      for (const x of arr) {
+        const k = String(x || "").trim().toLowerCase();
+        if (WEEK_KEYS.includes(k)) set.add(k);
+      }
+      const out = [...set];
+      return out.length ? out : DEFAULT_WEEKDAYS;
+    }
+
+    const normRules = normalizeRules(rules);
+    const normWeekdays = normalizeWeekdays(weekdays);
+
+    // если пришли rules — используем их
+    if (normRules.length > 0) {
+      db.prepare(`
+        INSERT INTO notify_settings (
+          telegram_user_id, group_id, group_title,
+          rules_json, weekdays_json,
+          times_json, days_json,
+          enabled, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, '[]', '[]', 1, ?)
+        ON CONFLICT(telegram_user_id, group_id) DO UPDATE SET
+          group_title=excluded.group_title,
+          rules_json=excluded.rules_json,
+          weekdays_json=excluded.weekdays_json,
+          times_json='[]',
+          days_json='[]',
+          enabled=1,
+          updated_at=excluded.updated_at
+      `).run(
+        userId,
+        gid,
+        title,
+        JSON.stringify(normRules),
+        JSON.stringify(normWeekdays),
+        Date.now()
+      );
+
+      return res.json({ ok: true });
+    }
+
+    // иначе — fallback на старую схему times/days
+    const t = Array.isArray(times) ? times.map(String).filter(isValidHHMM) : [];
+    const d = Array.isArray(days) ? days.map(String).filter(x => x === "today" || x === "tomorrow") : [];
+
+    if (t.length === 0) return res.status(400).json({ ok: false, error: 'times empty' });
+    if (d.length === 0) return res.status(400).json({ ok: false, error: 'days empty' });
+
+    db.prepare(`
+      INSERT INTO notify_settings (telegram_user_id, group_id, group_title, times_json, days_json, weekdays_json, enabled, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+      ON CONFLICT(telegram_user_id, group_id) DO UPDATE SET
+        group_title=excluded.group_title,
+        times_json=excluded.times_json,
+        days_json=excluded.days_json,
+        weekdays_json=excluded.weekdays_json,
+        enabled=1,
+        updated_at=excluded.updated_at
+    `).run(userId, gid, title, JSON.stringify(t), JSON.stringify(d), JSON.stringify(normWeekdays), Date.now());
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/notify/disable', (req, res) => {
+  try {
+    const { initData } = req.body || {};
+    const userId = getUserIdFromInitData(initData);
+
+    const sel = getSelectionForUser(userId);
+    if (!sel || sel.target_type !== 'group') return res.json({ ok: true });
+
+    const gid = Number(sel.target_id);
+
+    db.prepare(`DELETE FROM favorites WHERE telegram_user_id=? AND group_id=?`).run(userId, gid);
+    db.prepare(`DELETE FROM notify_settings WHERE telegram_user_id=? AND group_id=?`).run(userId, gid);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 app.post('/api/favorites/toggle', async (req, res) => {
   try {
     const { initData } = req.body || {};
@@ -324,6 +555,7 @@ app.post('/api/favorites/toggle', async (req, res) => {
 
     if (exists) {
       db.prepare(`DELETE FROM favorites WHERE telegram_user_id = ? AND group_id = ?`).run(userId, gid);
+      db.prepare(`DELETE FROM notify_settings WHERE telegram_user_id = ? AND group_id = ?`).run(userId, gid);
       return res.json({ ok: true, favorited: false });
     }
 
@@ -332,23 +564,19 @@ app.post('/api/favorites/toggle', async (req, res) => {
       VALUES (?, ?, ?, ?)
     `).run(userId, gid, title, Date.now());
 
-    // отправляем расписание в чат бота (на сегодня)
-    const today = new Date();
-    const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, '0');
-    const dd = String(today.getDate()).padStart(2, '0');
-    const dateStr = `${yyyy}.${mm}.${dd}`;
-
-    const py = await runPython('timetable_group', [gid, dateStr, dateStr]);
-    const msg = `⭐ Группа добавлена в избранное.\n\n` + formatScheduleText(py.items || [], dateStr, title);
-
-    try {
-      await tgSendMessageToUser({ userId, text: msg });
-    } catch (e) {
-      // если бот заблокирован — не ломаем добавление, просто предупреждаем
-      // (фронт покажет toast)
-      return res.json({ ok: true, favorited: true, warn: 'BOT_CHAT_UNAVAILABLE' });
-    }
+    // создаём дефолтные настройки уведомлений (если ещё нет)
+    db.prepare(`
+      INSERT OR IGNORE INTO notify_settings
+      (telegram_user_id, group_id, group_title, rules_json, weekdays_json, times_json, days_json, enabled, updated_at)
+      VALUES (?, ?, ?, ?, ?, '[]', '[]', 1, ?)
+    `).run(
+      userId,
+      gid,
+      title,
+      JSON.stringify([{ time: "19:00", day: "tomorrow" }]),
+      JSON.stringify(["mon","tue","wed","thu","fri","sat"]),
+      Date.now()
+    );
 
     return res.json({ ok: true, favorited: true });
   } catch (e) {
@@ -466,17 +694,7 @@ app.post('/api/selection/history', (req, res) => {
   }
 });
 
-db.exec(`
-CREATE TABLE IF NOT EXISTS favorites (
-  telegram_user_id INTEGER NOT NULL,
-  group_id INTEGER NOT NULL,
-  group_title TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (telegram_user_id, group_id)
-);
-CREATE INDEX IF NOT EXISTS idx_fav_user_time
-  ON favorites (telegram_user_id, created_at DESC);
-`);
+
 
 app.post('/api/timetable/has', async (req, res) => {
   try {
@@ -845,8 +1063,8 @@ app.post('/api/hw/draft/file/remove', (req, res) => {
 
     // удаляем физически
     if (removed?.rel_path) {
-      const abs = path.join(UPLOAD_ROOT, String(removed.rel_path));
-      safeUnlink(abs);
+      const abs = safeJoinUpload(removed.rel_path);
+      if (abs) safeUnlink(abs);
     }
 
     db.prepare(`
@@ -1086,15 +1304,6 @@ app.post('/api/hw/draft/cancel', (req, res) => {
   }
 });
 
-function addDaysStr(dateStr, n) {
-  const [y, m, d] = String(dateStr).split('.').map(Number);
-  const dt = new Date(y, (m || 1) - 1, d || 1);
-  dt.setDate(dt.getDate() + n);
-  const yy = dt.getFullYear();
-  const mm = String(dt.getMonth() + 1).padStart(2, '0');
-  const dd = String(dt.getDate()).padStart(2, '0');
-  return `${yy}.${mm}.${dd}`;
-}
 
 async function findNextPairForDraft(draft) {
   // ищем в ближайшие 30 дней следующую пару по тому же предмету + teacher
@@ -1291,6 +1500,207 @@ app.post('/api/hw/delete', (req, res) => {
     return res.status(401).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
+function ruDowFull(d) {
+  return ["воскресенье","понедельник","вторник","среду","четверг","пятницу","субботу"][d.getDay()];
+}
+function ruDowTitle(d) {
+  return ["воскресенье","понедельник","вторник","среда","четверг","пятница","суббота"][d.getDay()];
+}
+function dateToYMDdot(dt) {
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,'0');
+  const d = String(dt.getDate()).padStart(2,'0');
+  return `${y}.${m}.${d}`;
+}
+function parseStartMinutes(range) {
+  // ожидаем "HH:MM - HH:MM" или "HH:MM-HH:MM"
+  const m = String(range||"").match(/(\d{2}):(\d{2})/);
+  if (!m) return 1e9;
+  return Number(m[1])*60 + Number(m[2]);
+}
+function emojiNum(n) {
+  const map = ["0️⃣","1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
+  if (n >= 0 && n <= 10) return map[n];
+  return `${n}️⃣`;
+}
+function diffMinutes(aMin, bMin) {
+  return Math.max(0, bMin - aMin);
+}
+
+function formatBotLikeSchedule({ groupTitle, targetDate, items }) {
+  // items уже нормализованы fa_bridge.py (type, pair_no, teacher, room, time)
+  const dt = new Date(targetDate.replace(/\./g,'-')); // YYYY-MM-DD
+  // костыль: date "YYYY.MM.DD" -> норм Date
+  const [Y,M,D] = targetDate.split('.').map(Number);
+  const d = new Date(Y, (M||1)-1, D||1);
+
+  const header = `Расписание ${groupTitle} на ${ruDowTitle(d)} (${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}):`;
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return `${header}\n\nПар не найдено.`;
+  }
+
+  // сортировка по началу
+  const sorted = [...items].sort((a,b)=>parseStartMinutes(a.time)-parseStartMinutes(b.time));
+
+  const out = [header, ""];
+  for (let i=0;i<sorted.length;i++){
+    const p = sorted[i];
+    const no = p.pair_no || (i+1);
+    const line1 = `${emojiNum(no)} ${String(p.time||"").replace(/\s*-\s*/,'-')}. ${p.teacher||"—"} — ${p.room||"—"}.`;
+    const line2 = `${p.title||"—"} (${(p.type||"").replace(/ПАРА/i,"") || "Занятие"}).`.replace(/\s+\(\)\./, ".");
+    out.push(line1);
+    out.push(line2);
+
+    // перерыв до следующей пары
+    if (i < sorted.length - 1) {
+      const curStart = parseStartMinutes(p.time);
+      // берём конец текущей пары
+      const m2 = String(p.time||"").match(/(\d{2}):(\d{2}).*?(\d{2}):(\d{2})/);
+      const curEnd = m2 ? (Number(m2[3])*60 + Number(m2[4])) : curStart;
+      const nextStart = parseStartMinutes(sorted[i+1].time);
+      const br = diffMinutes(curEnd, nextStart);
+      if (br >= 20) out.push(`Перерыв ${br} минут.`);
+      out.push("");
+    }
+  }
+  return out.join("\n").trim();
+}
+
+const NOTIFY_TZ = process.env.NOTIFY_TZ || "Europe/Moscow";
+
+function nowPartsInTZ() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: NOTIFY_TZ,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false
+  }).formatToParts(new Date());
+
+  const get = (t) => parts.find(p => p.type === t)?.value;
+  return {
+    yyyy: get("year"),
+    mm: get("month"),
+    dd: get("day"),
+    hh: get("hour"),
+    mi: get("minute")
+  };
+}
+
+function addDaysStr(ymdDot, add) {
+  const [Y, M, D] = ymdDot.split('.').map(Number);
+  const dt = new Date(Y, (M || 1) - 1, D || 1);
+  dt.setDate(dt.getDate() + add);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const d = String(dt.getDate()).padStart(2, '0');
+  return `${y}.${m}.${d}`;
+}
+
+function weekdayKeyForYmdDot(ymdDot) {
+  const [Y, M, D] = String(ymdDot).split('.').map(Number);
+  // берём полдень UTC, чтобы не словить DST-край
+  const dt = new Date(Date.UTC(Y, (M || 1) - 1, D || 1, 12, 0, 0));
+  const w = new Intl.DateTimeFormat("en-US", { timeZone: NOTIFY_TZ, weekday: "short" }).format(dt);
+  const map = { Mon:"mon", Tue:"tue", Wed:"wed", Thu:"thu", Fri:"fri", Sat:"sat", Sun:"sun" };
+  return map[w] || null;
+}
+
+async function notifyTick() {
+  const p = nowPartsInTZ();
+  const hhmm = `${p.hh}:${p.mi}`;
+
+  const rows = db.prepare(`
+    SELECT telegram_user_id, group_id, group_title, times_json, days_json, rules_json, weekdays_json
+    FROM notify_settings
+    WHERE enabled = 1
+  `).all();
+
+  for (const r of rows) {
+    let times = [];
+    let days = [];
+    try { times = JSON.parse(r.times_json || "[]"); } catch {}
+    try { days  = JSON.parse(r.days_json  || "[]"); } catch {}
+    
+    const hasRulesField = r.rules_json !== null && r.rules_json !== undefined && String(r.rules_json).trim() !== "";
+    
+    let rules = null;
+    if (hasRulesField) {
+      try {
+        rules = JSON.parse(r.rules_json);
+        if (!Array.isArray(rules)) rules = [];
+      } catch {
+        // ❗ если rules_json битый — считаем что правил нет, но legacy НЕ используем
+        rules = [];
+      }
+    } else {
+      // старые записи: конвертируем times/days -> rules
+      rules = buildRulesFromLegacy(times, days);
+    }
+    
+    // weekdays
+    let weekdays = null;
+    try { weekdays = r.weekdays_json ? JSON.parse(r.weekdays_json) : null; } catch { weekdays = null; }
+    if (!Array.isArray(weekdays) || weekdays.length === 0) weekdays = ["mon","tue","wed","thu","fri","sat"];
+    
+    // ✅ ТЕПЕРЬ ВСЕГДА работаем через rules (даже если rules = [])
+    for (const rule of rules) {
+      const hhmmRule = String(rule?.time || "");
+      const dayType = String(rule?.day || "");
+    
+      if (hhmmRule !== hhmm) continue;
+      if (dayType !== "today" && dayType !== "tomorrow") continue;
+    
+      const todayYMD = `${p.yyyy}.${p.mm}.${p.dd}`;
+      const target = dayType === "today" ? todayYMD : addDaysStr(todayYMD, 1);
+    
+      const sent = db.prepare(`
+        SELECT 1 FROM notify_log
+        WHERE telegram_user_id=? AND group_id=? AND day_type=? AND schedule_date=? AND hhmm=?
+      `).get(r.telegram_user_id, r.group_id, String(dayType), target, hhmmRule);
+      if (sent) continue;
+    
+      const wKey = weekdayKeyForYmdDot(target);
+      if (wKey && !weekdays.includes(wKey)) continue;
+    
+      try {
+        const py = await runPython('timetable_group', [Number(r.group_id), target, target]);
+    
+        const text = formatBotLikeSchedule({
+          groupTitle: r.group_title,
+          targetDate: target,
+          items: py.items || []
+        });
+    
+        await tgSendMessageToUser({ userId: r.telegram_user_id, text });
+    
+        db.prepare(`
+          INSERT INTO notify_log (telegram_user_id, group_id, day_type, schedule_date, hhmm, sent_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(r.telegram_user_id, r.group_id, String(dayType), target, hhmmRule, Date.now());
+    
+        db.prepare(`
+          UPDATE notify_settings
+          SET last_error_at=NULL, last_error_text=NULL
+          WHERE telegram_user_id=? AND group_id=?
+        `).run(r.telegram_user_id, r.group_id);
+    
+      } catch (e) {
+        const msg = String(e?.message || e);
+        db.prepare(`
+          UPDATE notify_settings
+          SET last_error_at=?, last_error_text=?
+          WHERE telegram_user_id=? AND group_id=?
+        `).run(Date.now(), msg.slice(0, 400), r.telegram_user_id, r.group_id);
+      }
+    }
+    
+    // ✅ ВАЖНО: legacy блок ниже больше не нужен вообще
+    continue;
+  }
+}
+
+setInterval(() => { notifyTick().catch(()=>{}); }, 20000);
 
 app.listen(8000, () => {
   console.log('Backend listening on http://localhost:8000');

@@ -1689,3 +1689,364 @@ html, body {
   color: #000;
   opacity: 1;
 }
+
+.topLeftActions{
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.notifyFull{
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  background: #000;
+  color: #fff;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 14px 14px 22px;
+}
+
+.notifyContent{
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.notifyTitle{
+  text-align: center;
+  font-weight: 1000;
+  font-size: 28px;
+  margin: 14px 0 18px;
+}
+
+.notifyCard{
+  background: rgba(255,255,255,0.08);
+  border-radius: 18px;
+  padding: 16px 14px 14px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.45);
+  margin-bottom: 14px;
+}
+
+.notifyCardTitle{
+  font-weight: 1000;
+  font-size: 18px;
+  margin-bottom: 6px;
+}
+
+.notifyCardSub{
+  color: rgba(255,255,255,0.55);
+  font-weight: 800;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.notifyPills{
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.pill{
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  color: rgba(255,255,255,0.88);
+  border-radius: 14px;
+  padding: 10px 12px;
+  font-weight: 1000;
+  cursor: pointer;
+}
+
+.pill.on{
+  border-color: rgba(107,92,255,0.65);
+  background: rgba(107,92,255,0.28);
+}
+
+.notifyPicked{
+  margin-top: 10px;
+  font-weight: 1000;
+  color: rgba(107,92,255,0.95);
+}
+
+.notifySaveBtn{
+  width: 100%;
+  border: 0;
+  border-radius: 16px;
+  padding: 16px 14px;
+  font-weight: 1000;
+  font-size: 18px;
+  background: rgba(107,92,255,0.95);
+  color: #fff;
+  margin-top: 6px;
+}
+
+.notifyDangerBtn{
+  width: 100%;
+  border-radius: 16px;
+  padding: 14px 14px;
+  font-weight: 1000;
+  font-size: 18px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: transparent;
+  color: rgba(255,255,255,0.75);
+  margin-top: 12px;
+}
+
+.topBar { position: relative; }
+
+.topLeftActions,
+.topActions {
+  position: relative;
+  z-index: 5;
+}
+
+/* центр ниже */
+.topTitle {
+  
+  z-index: 1;
+}
+
+/* если у topTitle где-то стоит pointer-events:none — не ставь.
+   Если хочешь гарантированно убрать перекрытие кликов центром, можно так: */
+.topTitle { pointer-events: none; }
+.topTitleSub, .historyDropdown { pointer-events: auto; }
+
+.notifyRules{
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.notifyRuleRow{
+  display: grid;
+  grid-template-columns: auto 1fr 1fr 34px; /* timebox сам задаёт ширину */
+  gap: 10px;
+  align-items: center;
+}
+
+.notifyTimeInput{
+  height: 42px;
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  color: rgba(255,255,255,0.92);
+  font-weight: 900;
+  font-size: 14px;
+  padding: 0 12px;
+  outline: none;
+}
+
+.notifyRemoveRule{
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: transparent;
+  color: rgba(255,255,255,0.9);
+  font-weight: 1000;
+  font-size: 18px;
+  display: grid;
+  place-items: center;
+  justify-self: end;
+}
+
+.notifyAddRuleBtn{
+  width: 100%;
+  margin-top: 10px;
+  border-radius: 16px;
+  padding: 14px 14px;
+  font-weight: 1000;
+  font-size: 16px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: transparent;
+  color: rgba(255,255,255,0.75);
+}
+
+/* ===== Time input HH:MM (fixed colon, numeric keyboard) ===== */
+.notifyTimeBox{
+  height: 42px;
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  gap: 6px;
+
+  width: 104px;            /* компактнее, чем было */
+  justify-content: center;
+  overflow: hidden;        /* чтобы ничего не “вылезало” */
+}
+
+.notifyTimePart{
+  width: 28px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: rgba(255,255,255,0.92);
+  font-weight: 1000;
+  font-size: 14px;
+  text-align: center;
+  padding: 0;
+}
+
+.notifyTimePart::placeholder{
+  color: rgba(255,255,255,0.35);
+  font-weight: 900;
+}
+
+.notifyTimeColon{
+  color: rgba(255,255,255,0.55);
+  font-weight: 1000;
+  line-height: 1;
+}
+
+/* ===== Time input (HH:MM with fixed ':') ===== */
+.notifyTimeField{
+  height: 42px;
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  min-width: 110px; /* компактнее, чтобы не было "слишком широкая плашка" */
+}
+
+.notifyTimePart{
+  width: 28px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: rgba(255,255,255,0.92);
+  font-weight: 1000;
+  font-size: 14px;
+  text-align: center;
+  padding: 0;
+}
+
+.notifyTimePart::placeholder{
+  color: rgba(255,255,255,0.35);
+  font-weight: 900;
+}
+
+.notifyColon{
+  color: rgba(255,255,255,0.75);
+  font-weight: 1000;
+  font-size: 14px;
+  user-select: none;
+}
+
+/* ===== Fix row layout so X never "leaks" ===== */
+.notifyRuleRow{
+  display: grid;
+  grid-template-columns: 110px 1fr 1fr 36px;
+  gap: 10px;
+  align-items: center;
+}
+
+.notifyRemoveRule{
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: transparent;
+  color: rgba(255,255,255,0.9);
+  font-weight: 1000;
+  font-size: 18px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+/* pills чуть компактнее, чтобы всё влезало */
+.pill{
+  padding: 10px 10px;
+  border-radius: 14px;
+}
+
+.timeInput {
+  width: 72px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+  padding: 0 10px;
+  font-size: 14px;
+}
+
+.notifyPills{
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: nowrap;          /* ✅ в одну строку */
+  gap: 8px;                   /* чуть плотнее */
+  overflow: hidden;           /* не даём вылезать */
+}
+
+/* ✅ компактные pill именно для дней недели */
+.notifyPills .pill{
+  padding: 8px 10px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1;
+  min-width: 0;
+}
+
+.timeInput{
+  height: 42px;
+  width: 110px;                 /* ✅ чуть шире под HH:MM */
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  color: rgba(255,255,255,0.92);
+
+  font-weight: 1000;
+  font-size: 14px;
+  text-align: center;
+
+  outline: none;
+  padding: 0 10px;
+}
+
+.timeInput::placeholder{
+  color: rgba(255,255,255,0.35);
+  font-weight: 900;
+}
+
+.timeInput:focus{
+  border-color: rgba(107,92,255,0.55);
+  box-shadow: 0 0 0 3px rgba(107,92,255,0.14);
+}
+
+.notifyRemoveRule{
+  width: 36px;
+  height: 42px;                 /* ✅ одинаково по высоте с инпутом */
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+
+  display: grid;
+  place-items: center;
+
+  color: rgba(255,255,255,0.92);
+  font-weight: 1000;
+  font-size: 18px;
+  line-height: 1;               /* ✅ центрирование символа */
+  padding: 0;
+  cursor: pointer;
+}
+
+.notifyRemoveRule:active{
+  transform: scale(0.98);
+  opacity: 0.85;
+}
+
+.notifyRuleRow{
+  display: grid;
+  grid-template-columns: 110px 1fr 1fr 36px; /* ✅ ровно под timeInput + X */
+  gap: 10px;
+  align-items: center;
+}
