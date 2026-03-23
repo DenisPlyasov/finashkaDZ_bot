@@ -17,6 +17,32 @@ const __dirname = path.dirname(__filename);
 const UPLOAD_ROOT = path.join(__dirname, 'uploads');
 ensureDir(UPLOAD_ROOT);
 
+const CACHE_DIR = path.join(__dirname, '.cache');
+ensureDir(CACHE_DIR);
+
+function cachePath(key) {
+  return path.join(CACHE_DIR, safeSlug(key) + '.json');
+}
+
+function cacheGet(key, maxAgeMs) {
+  try {
+    const p = cachePath(key);
+    const raw = fs.readFileSync(p, 'utf-8');
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj.ts !== 'number') return null;
+    if (Date.now() - obj.ts > maxAgeMs) return null;
+    return obj.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheSet(key, data) {
+  try {
+    fs.writeFileSync(cachePath(key), JSON.stringify({ ts: Date.now(), data }));
+  } catch {}
+}
+
 const app = express();
 app.use(express.json());
 app.use('/files', express.static(UPLOAD_ROOT));
@@ -100,9 +126,9 @@ function getUserIdFromInitData(initData) {
   return user.id;
 }
 
-function runPython(cmd, args = []) {
+function runPython(cmd, args = [], { timeoutMs = 12000 } = {}) {
   return new Promise((resolve, reject) => {
-    const sh = path.join(__dirname, 'fa_bridge.sh');   // <-- обёртка
+    const sh = path.join(__dirname, 'fa_bridge.sh');
     const py = spawn('bash', [sh, cmd, ...args.map(String)], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -110,22 +136,37 @@ function runPython(cmd, args = []) {
     let out = '';
     let err = '';
 
+    const t = setTimeout(() => {
+      try { py.kill('SIGKILL'); } catch {}
+    }, timeoutMs);
+
     py.stdout.on('data', (d) => (out += d.toString('utf-8')));
     py.stderr.on('data', (d) => (err += d.toString('utf-8')));
 
-    // ВАЖНО: ловим ошибку запуска (файл не найден/нет прав)
-    py.on('error', (e) => reject(new Error(`spawn failed: ${e.message}`)));
+    py.on('error', (e) => {
+      clearTimeout(t);
+      reject(new Error(`spawn failed: ${e.message}`));
+    });
 
-    py.on('close', (code) => {
-      if (code !== 0) return reject(new Error(err || `python exit code ${code}`));
+    py.on('close', (code, signal) => {
+      clearTimeout(t);
+
+      if (signal === 'SIGKILL') {
+        return reject(new Error('FA_TIMEOUT'));
+      }
+      if (code !== 0) {
+        return reject(new Error((err || `python exit code ${code}`).slice(0, 800)));
+      }
+
       try {
         const json = JSON.parse(out);
         if (!json.ok) return reject(new Error(json.error || 'python error'));
         resolve(json);
       } catch (e) {
-        reject(new Error(`bad python json: ${String(e)} | out=${out.slice(0, 200)}`));
+        reject(new Error(`bad python json: ${String(e)} | out=${out.slice(0, 200)} | err=${err.slice(0, 200)}`));
       }
     });
+
     console.log('[runPython]', sh, cmd, args);
   });
 }
@@ -192,6 +233,35 @@ CREATE TABLE IF NOT EXISTS user_selection_history (
 );
 CREATE INDEX IF NOT EXISTS idx_user_selection_history_user_time
   ON user_selection_history (telegram_user_id, used_at DESC);
+`);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS schedule_snapshots (
+  target_type TEXT NOT NULL,
+  target_id INTEGER NOT NULL,
+  target_title TEXT NOT NULL DEFAULT '',
+  schedule_date TEXT NOT NULL,
+
+  data_json TEXT NOT NULL DEFAULT '[]',
+  actual_at INTEGER,
+  last_checked_at INTEGER,
+  last_success_at INTEGER,
+  last_requested_at INTEGER,
+  last_error_at INTEGER,
+  last_error_text TEXT,
+
+  candidate_json TEXT,
+  candidate_first_seen_at INTEGER,
+  candidate_seen_count INTEGER NOT NULL DEFAULT 0,
+
+  PRIMARY KEY (target_type, target_id, schedule_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_snapshots_requested
+  ON schedule_snapshots (last_requested_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_snapshots_checked
+  ON schedule_snapshots (last_checked_at ASC);
 `);
 
 
@@ -264,6 +334,9 @@ tryAlter(`ALTER TABLE homework ADD COLUMN pair_type TEXT`);
 tryAlter(`ALTER TABLE homework_drafts ADD COLUMN pair_type TEXT`);
 tryAlter(`ALTER TABLE notify_settings ADD COLUMN rules_json TEXT`);
 tryAlter(`ALTER TABLE notify_settings ADD COLUMN weekdays_json TEXT`);
+
+// После перезапуска процесса убираем незавершённые "бронь"-записи уведомлений.
+db.prepare(`DELETE FROM notify_log WHERE sent_at = 0`).run();
 
 // -------- existing endpoints --------
 app.get('/api/ping', (req, res) => {
@@ -428,6 +501,66 @@ function buildRulesFromLegacy(times, days) {
     for (const day of d) out.push({ time, day });
   }
   return normalizeRules(out);
+}
+
+const claimNotifyLogStmt = db.prepare(`
+  INSERT OR IGNORE INTO notify_log (
+    telegram_user_id, group_id, day_type, schedule_date, hhmm, sent_at
+  )
+  VALUES (?, ?, ?, ?, ?, 0)
+`);
+
+const finalizeNotifyLogStmt = db.prepare(`
+  UPDATE notify_log
+  SET sent_at = ?
+  WHERE telegram_user_id = ?
+    AND group_id = ?
+    AND day_type = ?
+    AND schedule_date = ?
+    AND hhmm = ?
+    AND sent_at = 0
+`);
+
+const releaseNotifyLogClaimStmt = db.prepare(`
+  DELETE FROM notify_log
+  WHERE telegram_user_id = ?
+    AND group_id = ?
+    AND day_type = ?
+    AND schedule_date = ?
+    AND hhmm = ?
+    AND sent_at = 0
+`);
+
+function tryClaimNotifyLog({ telegramUserId, groupId, dayType, scheduleDate, hhmm }) {
+  const info = claimNotifyLogStmt.run(
+    telegramUserId,
+    groupId,
+    dayType,
+    scheduleDate,
+    hhmm
+  );
+  return info.changes > 0;
+}
+
+function finalizeNotifyLogClaim({ telegramUserId, groupId, dayType, scheduleDate, hhmm }) {
+  finalizeNotifyLogStmt.run(
+    Date.now(),
+    telegramUserId,
+    groupId,
+    dayType,
+    scheduleDate,
+    hhmm
+  );
+}
+
+function releaseNotifyLogClaim({ telegramUserId, groupId, dayType, scheduleDate, hhmm }) {
+  releaseNotifyLogClaimStmt.run(
+    telegramUserId,
+    groupId,
+    dayType,
+    scheduleDate,
+    hhmm
+  );
 }
 
 app.post('/api/notify/set', (req, res) => {
@@ -666,6 +799,12 @@ app.post('/api/selection/set', (req, res) => {
         LIMIT 5
       )
     `).run(userId, userId);
+
+    warmupScheduleWindowForTarget({
+      targetType: String(type),
+      targetId: Number(id),
+      targetTitle: String(title),
+    });
 
     return res.json({ ok: true });
   } catch (e) {
@@ -961,6 +1100,622 @@ function buildDownloadName(fileItem) {
   return `${base}${ext}`;
 }
 
+function cleanPairText(value) {
+  return String(value ?? '').trim();
+}
+
+function uniqNonEmpty(values) {
+  const out = [];
+  const seen = new Set();
+
+  for (const value of values || []) {
+    const s = cleanPairText(value);
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+
+  return out;
+}
+
+function makePairVariant(item) {
+  return {
+    teacher: cleanPairText(item?.teacher),
+    room: cleanPairText(item?.room),
+    link: cleanPairText(item?.link),
+  };
+}
+
+function pairVariantKey(variant) {
+  return [
+    cleanPairText(variant?.teacher),
+    cleanPairText(variant?.room),
+    cleanPairText(variant?.link),
+  ].join('\u001f');
+}
+
+function timetableCollapseKey(item) {
+  return [
+    cleanPairText(item?.date),
+    cleanPairText(item?.time),
+    cleanPairText(item?.type),
+    cleanPairText(item?.title),
+  ].join('\u001f');
+}
+
+function collapseTimetableItems(items, { combineDuplicates = false } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const groups = new Map();
+
+  for (const raw of list) {
+    const item = raw && typeof raw === 'object' ? raw : {};
+    const key = combineDuplicates ? timetableCollapseKey(item) : `${groups.size}\u001f${timetableCollapseKey(item)}`;
+
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        ...item,
+        combined: false,
+        variants: [],
+        hw_teacher: cleanPairText(item?.teacher),
+        _variantKeys: new Set(),
+      };
+      groups.set(key, group);
+    }
+
+    const variant = makePairVariant(item);
+    const variantKey = pairVariantKey(variant);
+    if (!group._variantKeys.has(variantKey)) {
+      group._variantKeys.add(variantKey);
+      group.variants.push(variant);
+    }
+  }
+
+  return Array.from(groups.values()).map((group) => {
+    const { _variantKeys, ...rest } = group;
+    const variants = Array.isArray(rest.variants) && rest.variants.length > 0
+      ? rest.variants
+      : [makePairVariant(rest)];
+
+    const teachers = uniqNonEmpty(variants.map((variant) => variant.teacher));
+    const rooms = uniqNonEmpty(variants.map((variant) => variant.room));
+    const links = uniqNonEmpty(variants.map((variant) => variant.link));
+    const combined = combineDuplicates && variants.length > 1;
+
+    return {
+      ...rest,
+      variants,
+      combined,
+      teacher: teachers.join('; ') || cleanPairText(rest.teacher),
+      room: combined ? '' : (rooms[0] || cleanPairText(rest.room)),
+      link: combined ? '' : (links[0] || cleanPairText(rest.link)),
+      hw_teacher: combined ? '' : (teachers[0] || cleanPairText(rest.teacher)),
+    };
+  });
+}
+
+const selectHomeworksForScheduleStmt = db.prepare(`
+  SELECT id, text, deadline_date, files_json, pair_teacher
+  FROM homework
+  WHERE target_type = ?
+    AND target_id = ?
+    AND pair_date = ?
+    AND pair_title = ?
+    AND COALESCE(pair_type,'') = COALESCE(?, '')
+    AND COALESCE(pair_time,'') = COALESCE(?, '')
+    AND (only_for_user_id IS NULL OR only_for_user_id = ?)
+  ORDER BY created_at DESC
+`);
+
+function pairTeacherSet(item) {
+  const set = new Set();
+  const variants = Array.isArray(item?.variants) ? item.variants : [];
+
+  if (variants.length > 0) {
+    for (const variant of variants) {
+      const teacher = cleanPairText(variant?.teacher);
+      if (teacher) set.add(teacher);
+    }
+  } else {
+    const teacher = cleanPairText(item?.teacher);
+    if (teacher) set.add(teacher);
+  }
+
+  return set;
+}
+
+function homeworkMatchesScheduleItemTeacher(pairTeacher, item) {
+  const wantedTeacher = cleanPairText(pairTeacher);
+  if (!wantedTeacher) return true;
+
+  const teachers = pairTeacherSet(item);
+  if (teachers.size === 0) return false;
+
+  return teachers.has(wantedTeacher);
+}
+
+function loadHomeworksForScheduleItem({ sel, date, item, userId }) {
+  const rows = selectHomeworksForScheduleStmt.all(
+    sel.target_type,
+    sel.target_id,
+    String(date),
+    cleanPairText(item?.title),
+    cleanPairText(item?.type) || null,
+    cleanPairText(item?.time) || null,
+    userId
+  );
+
+  return rows
+    .filter((row) => homeworkMatchesScheduleItemTeacher(row.pair_teacher, item))
+    .map(({ pair_teacher, ...rest }) => rest);
+}
+
+function buildScheduleDayItems({ rawItems, sel, date, userId }) {
+  const collapsed = collapseTimetableItems(rawItems, {
+    combineDuplicates: sel?.target_type === 'group',
+  });
+
+  return collapsed.map((item) => ({
+    ...item,
+    homeworks: loadHomeworksForScheduleItem({ sel, date, item, userId }),
+  }));
+}
+
+function scheduleSnapshotKey({ targetType, targetId, scheduleDate }) {
+  return `${targetType}:${targetId}:${scheduleDate}`;
+}
+
+function safeParseScheduleJson(raw) {
+  try {
+    const items = JSON.parse(raw || '[]');
+    return Array.isArray(items) ? items : [];
+  } catch {
+    return [];
+  }
+}
+
+function stableScheduleJson(items) {
+  return JSON.stringify(Array.isArray(items) ? items : []);
+}
+
+const selectScheduleSnapshotStmt = db.prepare(`
+  SELECT *
+  FROM schedule_snapshots
+  WHERE target_type = ? AND target_id = ? AND schedule_date = ?
+`);
+
+const upsertScheduleSnapshotTouchStmt = db.prepare(`
+  INSERT INTO schedule_snapshots (
+    target_type, target_id, target_title, schedule_date,
+    data_json, candidate_seen_count, last_requested_at
+  )
+  VALUES (?, ?, ?, ?, '[]', 0, ?)
+  ON CONFLICT(target_type, target_id, schedule_date) DO UPDATE SET
+    target_title = excluded.target_title,
+    last_requested_at = CASE
+      WHEN excluded.last_requested_at IS NOT NULL THEN excluded.last_requested_at
+      ELSE schedule_snapshots.last_requested_at
+    END
+`);
+
+function getScheduleSnapshotRow({ targetType, targetId, scheduleDate }) {
+  return selectScheduleSnapshotStmt.get(targetType, Number(targetId), scheduleDate) || null;
+}
+
+function touchScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDate, requestedAt = null }) {
+  upsertScheduleSnapshotTouchStmt.run(
+    targetType,
+    Number(targetId),
+    String(targetTitle || ''),
+    scheduleDate,
+    requestedAt != null ? Number(requestedAt) : null
+  );
+  return getScheduleSnapshotRow({ targetType, targetId, scheduleDate });
+}
+
+function markScheduleSnapshotError({ targetType, targetId, scheduleDate, errorText }) {
+  db.prepare(`
+    UPDATE schedule_snapshots
+    SET last_error_at = ?, last_error_text = ?
+    WHERE target_type = ? AND target_id = ? AND schedule_date = ?
+  `).run(
+    Date.now(),
+    String(errorText || '').slice(0, 400),
+    targetType,
+    Number(targetId),
+    scheduleDate
+  );
+}
+
+function confirmScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDate, itemsJson, confirmedAt }) {
+  db.prepare(`
+    UPDATE schedule_snapshots
+    SET target_title = ?,
+        data_json = ?,
+        actual_at = ?,
+        last_checked_at = ?,
+        last_success_at = ?,
+        last_error_at = NULL,
+        last_error_text = NULL,
+        candidate_json = NULL,
+        candidate_first_seen_at = NULL,
+        candidate_seen_count = 0
+    WHERE target_type = ? AND target_id = ? AND schedule_date = ?
+  `).run(
+    String(targetTitle || ''),
+    itemsJson,
+    confirmedAt,
+    confirmedAt,
+    confirmedAt,
+    targetType,
+    Number(targetId),
+    scheduleDate
+  );
+}
+
+function setScheduleSnapshotCandidate({
+  targetType,
+  targetId,
+  targetTitle,
+  scheduleDate,
+  candidateJson,
+  candidateSeenCount,
+  candidateFirstSeenAt,
+  checkedAt,
+}) {
+  db.prepare(`
+    UPDATE schedule_snapshots
+    SET target_title = ?,
+        last_checked_at = ?,
+        last_success_at = ?,
+        last_error_at = NULL,
+        last_error_text = NULL,
+        candidate_json = ?,
+        candidate_first_seen_at = ?,
+        candidate_seen_count = ?
+    WHERE target_type = ? AND target_id = ? AND schedule_date = ?
+  `).run(
+    String(targetTitle || ''),
+    checkedAt,
+    checkedAt,
+    candidateJson,
+    candidateFirstSeenAt,
+    Number(candidateSeenCount || 0),
+    targetType,
+    Number(targetId),
+    scheduleDate
+  );
+}
+
+function applyFreshScheduleSnapshot({
+  targetType,
+  targetId,
+  targetTitle,
+  scheduleDate,
+  freshItems,
+}) {
+  const now = Date.now();
+  touchScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDate });
+
+  const row = getScheduleSnapshotRow({ targetType, targetId, scheduleDate });
+  const freshJson = stableScheduleJson(freshItems);
+  const currentJson = row?.data_json || '[]';
+  const hasConfirmedSnapshot = Number(row?.actual_at || 0) > 0 || Number(row?.last_success_at || 0) > 0;
+
+  if (!hasConfirmedSnapshot) {
+    confirmScheduleSnapshot({
+      targetType,
+      targetId,
+      targetTitle,
+      scheduleDate,
+      itemsJson: freshJson,
+      confirmedAt: now,
+    });
+    return {
+      state: 'initial',
+      snapshotRow: getScheduleSnapshotRow({ targetType, targetId, scheduleDate }),
+    };
+  }
+
+  if (freshJson === currentJson) {
+    confirmScheduleSnapshot({
+      targetType,
+      targetId,
+      targetTitle,
+      scheduleDate,
+      itemsJson: freshJson,
+      confirmedAt: now,
+    });
+    return {
+      state: 'confirmed',
+      snapshotRow: getScheduleSnapshotRow({ targetType, targetId, scheduleDate }),
+    };
+  }
+
+  if (row?.candidate_json && row.candidate_json === freshJson) {
+    const seen = Number(row.candidate_seen_count || 0) + 1;
+    if (seen >= 2) {
+      confirmScheduleSnapshot({
+        targetType,
+        targetId,
+        targetTitle,
+        scheduleDate,
+        itemsJson: freshJson,
+        confirmedAt: now,
+      });
+      return {
+        state: 'promoted',
+        snapshotRow: getScheduleSnapshotRow({ targetType, targetId, scheduleDate }),
+      };
+    }
+
+    setScheduleSnapshotCandidate({
+      targetType,
+      targetId,
+      targetTitle,
+      scheduleDate,
+      candidateJson: freshJson,
+      candidateSeenCount: seen,
+      candidateFirstSeenAt: Number(row.candidate_first_seen_at || now),
+      checkedAt: now,
+    });
+
+    return {
+      state: 'candidate',
+      snapshotRow: getScheduleSnapshotRow({ targetType, targetId, scheduleDate }),
+    };
+  }
+
+  setScheduleSnapshotCandidate({
+    targetType,
+    targetId,
+    targetTitle,
+    scheduleDate,
+    candidateJson: freshJson,
+    candidateSeenCount: 1,
+    candidateFirstSeenAt: now,
+    checkedAt: now,
+  });
+
+  return {
+    state: 'candidate',
+    snapshotRow: getScheduleSnapshotRow({ targetType, targetId, scheduleDate }),
+  };
+}
+
+function buildTimetableResponseFromSnapshot({ snapshotRow, sel, date, userId, warning = null, showingSavedVersion = false }) {
+  if (!snapshotRow || !snapshotRow.actual_at) return null;
+
+  const rawItems = safeParseScheduleJson(snapshotRow.data_json);
+  const items = buildScheduleDayItems({
+    rawItems,
+    sel,
+    date,
+    userId,
+  });
+
+  return {
+    ok: true,
+    items,
+    count: items.length,
+    stale: !!showingSavedVersion,
+    fromCache: !!showingSavedVersion,
+    actualAt: Number(snapshotRow.actual_at || snapshotRow.last_success_at || 0) || null,
+    checkedAt: Number(snapshotRow.last_checked_at || 0) || null,
+    showingSavedVersion: !!showingSavedVersion,
+    warning: warning || null,
+  };
+}
+
+const scheduleSnapshotRefreshInFlight = new Map();
+
+async function refreshScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDate, requestedAt = null }) {
+  touchScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDate, requestedAt });
+
+  const key = scheduleSnapshotKey({ targetType, targetId, scheduleDate });
+  if (scheduleSnapshotRefreshInFlight.has(key)) {
+    return scheduleSnapshotRefreshInFlight.get(key);
+  }
+
+  const promise = (async () => {
+    const cmd = targetType === 'teacher' ? 'timetable_teacher' : 'timetable_group';
+    const py = await runPython(cmd, [Number(targetId), scheduleDate, scheduleDate], { timeoutMs: 12000 });
+
+    return applyFreshScheduleSnapshot({
+      targetType,
+      targetId,
+      targetTitle,
+      scheduleDate,
+      freshItems: py.items || [],
+    });
+  })().finally(() => {
+    scheduleSnapshotRefreshInFlight.delete(key);
+  });
+
+  scheduleSnapshotRefreshInFlight.set(key, promise);
+  return promise;
+}
+
+function scheduleRefreshIntervalMs(scheduleDate) {
+  const today = ymdDotToday(0);
+  const tomorrow = addDaysStr(today, 1);
+  const plusWeek = addDaysStr(today, 7);
+
+  if (scheduleDate <= tomorrow) return 60 * 1000;
+  if (scheduleDate <= plusWeek) return 10 * 60 * 1000;
+  return 60 * 60 * 1000;
+}
+
+function ymdDotToday(offset = 0) {
+  const parts = nowPartsInTZ();
+  const base = `${parts.yyyy}.${parts.mm}.${parts.dd}`;
+  return addDaysStr(base, offset);
+}
+
+function collectTrackedScheduleTargets(limit = 60) {
+  const out = [];
+  const seen = new Set();
+
+  const push = (targetType, targetId, targetTitle) => {
+    const type = String(targetType || '').trim();
+    const id = Number(targetId || 0);
+    if (!type || !id) return;
+
+    const key = `${type}:${id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ targetType: type, targetId: id, targetTitle: String(targetTitle || '') });
+  };
+
+  for (const row of db.prepare(`
+    SELECT target_type, target_id, target_title
+    FROM user_selection
+    ORDER BY updated_at DESC
+    LIMIT 30
+  `).all()) {
+    push(row.target_type, row.target_id, row.target_title);
+  }
+
+  for (const row of db.prepare(`
+    SELECT target_type, target_id, target_title
+    FROM user_selection_history
+    ORDER BY used_at DESC
+    LIMIT 40
+  `).all()) {
+    push(row.target_type, row.target_id, row.target_title);
+  }
+
+  for (const row of db.prepare(`
+    SELECT group_id AS target_id, group_title AS target_title
+    FROM favorites
+    ORDER BY created_at DESC
+    LIMIT 40
+  `).all()) {
+    push('group', row.target_id, row.target_title);
+  }
+
+  for (const row of db.prepare(`
+    SELECT group_id AS target_id, group_title AS target_title
+    FROM notify_settings
+    ORDER BY updated_at DESC
+    LIMIT 40
+  `).all()) {
+    push('group', row.target_id, row.target_title);
+  }
+
+  return out.slice(0, limit);
+}
+
+function pickSeedScheduleTasks(limit = 4) {
+  const tasks = [];
+  const dates = [ymdDotToday(0), ymdDotToday(1)];
+
+  for (const target of collectTrackedScheduleTargets()) {
+    for (const scheduleDate of dates) {
+      const row = getScheduleSnapshotRow({
+        targetType: target.targetType,
+        targetId: target.targetId,
+        scheduleDate,
+      });
+
+      if (row?.last_checked_at && (Number(row.last_checked_at) + scheduleRefreshIntervalMs(scheduleDate)) > Date.now()) {
+        continue;
+      }
+
+      tasks.push({
+        targetType: target.targetType,
+        targetId: target.targetId,
+        targetTitle: target.targetTitle,
+        scheduleDate,
+      });
+
+      if (tasks.length >= limit) return tasks;
+    }
+  }
+
+  return tasks;
+}
+
+function pickRecentSnapshotRefreshTasks(limit = 6) {
+  const now = Date.now();
+  const rows = db.prepare(`
+    SELECT target_type, target_id, target_title, schedule_date, last_checked_at
+    FROM schedule_snapshots
+    WHERE actual_at IS NOT NULL
+      AND last_requested_at IS NOT NULL
+      AND last_requested_at >= ?
+    ORDER BY COALESCE(last_requested_at, 0) DESC
+    LIMIT 120
+  `).all(now - (30 * 24 * 60 * 60 * 1000));
+
+  const tasks = [];
+  for (const row of rows) {
+    const interval = scheduleRefreshIntervalMs(String(row.schedule_date));
+    if ((Number(row.last_checked_at || 0) + interval) > now) continue;
+
+    tasks.push({
+      targetType: row.target_type,
+      targetId: Number(row.target_id),
+      targetTitle: row.target_title,
+      scheduleDate: String(row.schedule_date),
+    });
+
+    if (tasks.length >= limit) break;
+  }
+
+  return tasks;
+}
+
+function warmupScheduleWindowForTarget({ targetType, targetId, targetTitle }) {
+  const requestedAt = Date.now();
+  const dates = [ymdDotToday(0), ymdDotToday(1)];
+
+  for (const scheduleDate of dates) {
+    refreshScheduleSnapshot({
+      targetType,
+      targetId,
+      targetTitle,
+      scheduleDate,
+      requestedAt,
+    }).catch(() => {});
+  }
+}
+
+let scheduleSnapshotTickRunning = false;
+
+async function scheduleSnapshotTick() {
+  if (scheduleSnapshotTickRunning) return;
+  scheduleSnapshotTickRunning = true;
+
+  try {
+    const tasks = [...pickSeedScheduleTasks(4), ...pickRecentSnapshotRefreshTasks(6)];
+    const unique = [];
+    const seen = new Set();
+
+    for (const task of tasks) {
+      const key = scheduleSnapshotKey(task);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(task);
+    }
+
+    for (const task of unique.slice(0, 6)) {
+      try {
+        await refreshScheduleSnapshot(task);
+      } catch (e) {
+        markScheduleSnapshotError({
+          targetType: task.targetType,
+          targetId: task.targetId,
+          scheduleDate: task.scheduleDate,
+          errorText: String(e?.message || e),
+        });
+      }
+    }
+  } finally {
+    scheduleSnapshotTickRunning = false;
+  }
+}
+
 
 app.post('/api/hw/file/send_to_chat', async (req, res) => {
   try {
@@ -1130,65 +1885,119 @@ app.post('/api/hw/file/remove', (req, res) => {
 });
 
 app.post('/api/timetable/day', async (req, res) => {
+  const { initData, date } = req.body || {};
+  if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+  if (!date) return res.status(400).json({ ok: false, error: 'date missing' });
+
+  let userId, sel;
   try {
-    const { initData, date } = req.body || {};
-    if (!initData) return res.status(400).json({ error: 'initData missing' });
-    if (!date) return res.status(400).json({ error: 'date missing' }); // "YYYY.MM.DD"
+    userId = getUserIdFromInitData(initData);
 
-    const userId = getUserIdFromInitData(initData);
-
-    const sel = db.prepare(`
+    sel = db.prepare(`
       SELECT target_type, target_id, target_title
       FROM user_selection
       WHERE telegram_user_id = ?
     `).get(userId);
 
-    if (!sel) return res.status(404).json({ error: 'No selection' });
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
 
-    const cmd = sel.target_type === 'teacher' ? 'timetable_teacher' : 'timetable_group';
+  const cacheKey = `tt_${sel.target_type}_${sel.target_id}_${String(date)}`;
+  const requestedAt = Date.now();
 
-    // один день
-    const py = await runPython(cmd, [sel.target_id, date, date]);
+  touchScheduleSnapshot({
+    targetType: sel.target_type,
+    targetId: sel.target_id,
+    targetTitle: sel.target_title,
+    scheduleDate: String(date),
+    requestedAt,
+  });
 
-    const items = (py.items || []).map((p) => {
-      const hws = db.prepare(`
-        SELECT id, text, deadline_date, files_json
-        FROM homework
-        WHERE target_type = ?
-          AND target_id = ?
-          AND pair_date = ?
-          AND pair_title = ?
-          AND COALESCE(pair_teacher,'') = COALESCE(?, '')
-          AND COALESCE(pair_type,'')    = COALESCE(?, '')
-          AND COALESCE(pair_time,'')    = COALESCE(?, '')
-          AND (only_for_user_id IS NULL OR only_for_user_id = ?)
-        ORDER BY created_at DESC
-      `).all(
-        sel.target_type,
-        sel.target_id,
-        String(date),
-        String(p.title || ''),
-        p.teacher ? String(p.teacher) : null,
-        p.type ? String(p.type) : null,
-        p.time ? String(p.time) : null,
-        userId
-      );
-    
-      return { ...p, homeworks: hws };
+  try {
+    const refresh = await refreshScheduleSnapshot({
+      targetType: sel.target_type,
+      targetId: sel.target_id,
+      targetTitle: sel.target_title,
+      scheduleDate: String(date),
+      requestedAt,
     });
-    
-    return res.json({
+
+    const snapshotResponse = buildTimetableResponseFromSnapshot({
+      snapshotRow: refresh.snapshotRow,
+      sel,
+      date,
+      userId,
+      showingSavedVersion: refresh.state === 'candidate',
+      warning: refresh.state === 'candidate'
+        ? 'Расписание обновляется — показана сохранённая версия'
+        : null,
+    });
+
+    if (!snapshotResponse) {
+      return res.json({
+        ok: false,
+        error: 'SCHEDULE_SNAPSHOT_EMPTY',
+        items: [],
+        count: 0,
+        stale: false,
+        fromCache: false,
+        actualAt: null,
+        checkedAt: null,
+        showingSavedVersion: false,
+      });
+    }
+
+    cacheSet(cacheKey, {
       ok: true,
-      items,
-      count: Number(py.count || 0),
+      count: snapshotResponse.count,
+      items: safeParseScheduleJson(refresh.snapshotRow?.data_json || '[]'),
     });
+
+    return res.json(snapshotResponse);
 
   } catch (e) {
     const msg = String(e?.message || e);
-    if (/FA_TIMEOUT|timeout/i.test(msg)) {
-      return res.status(504).json({ ok: false, error: 'FA_TIMEOUT' });
+    markScheduleSnapshotError({
+      targetType: sel.target_type,
+      targetId: sel.target_id,
+      scheduleDate: String(date),
+      errorText: msg,
+    });
+
+    const snapshotRow = getScheduleSnapshotRow({
+      targetType: sel.target_type,
+      targetId: sel.target_id,
+      scheduleDate: String(date),
+    });
+
+    const snapshotResponse = buildTimetableResponseFromSnapshot({
+      snapshotRow,
+      sel,
+      date,
+      userId,
+      showingSavedVersion: true,
+      warning: /FA_TIMEOUT/.test(msg)
+        ? 'Расписание обновляется — показана сохранённая версия'
+        : 'Источник недоступен — показана сохранённая версия',
+    });
+
+    if (snapshotResponse) {
+      return res.json(snapshotResponse);
     }
-    return res.status(500).json({ ok: false, error: msg });
+
+    return res.json({
+      ok: false,
+      error: /FA_TIMEOUT/.test(msg) ? 'FA_TIMEOUT' : msg.slice(0, 300),
+      items: [],
+      count: 0,
+      stale: false,
+      fromCache: false,
+      actualAt: null,
+      checkedAt: null,
+      showingSavedVersion: false,
+    });
   }
 });
 
@@ -1653,15 +2462,21 @@ async function notifyTick() {
     
       const todayYMD = `${p.yyyy}.${p.mm}.${p.dd}`;
       const target = dayType === "today" ? todayYMD : addDaysStr(todayYMD, 1);
-    
-      const sent = db.prepare(`
-        SELECT 1 FROM notify_log
-        WHERE telegram_user_id=? AND group_id=? AND day_type=? AND schedule_date=? AND hhmm=?
-      `).get(r.telegram_user_id, r.group_id, String(dayType), target, hhmmRule);
-      if (sent) continue;
-    
+
       const wKey = weekdayKeyForYmdDot(target);
       if (wKey && !weekdays.includes(wKey)) continue;
+
+      const notifyKey = {
+        telegramUserId: r.telegram_user_id,
+        groupId: r.group_id,
+        dayType: String(dayType),
+        scheduleDate: target,
+        hhmm: hhmmRule,
+      };
+
+      // Бронируем отправку до внешних вызовов, чтобы параллельные тики
+      // не дублировали одно и то же уведомление в одну минуту.
+      if (!tryClaimNotifyLog(notifyKey)) continue;
     
       try {
         const py = await runPython('timetable_group', [Number(r.group_id), target, target]);
@@ -1673,11 +2488,8 @@ async function notifyTick() {
         });
     
         await tgSendMessageToUser({ userId: r.telegram_user_id, text });
-    
-        db.prepare(`
-          INSERT INTO notify_log (telegram_user_id, group_id, day_type, schedule_date, hhmm, sent_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(r.telegram_user_id, r.group_id, String(dayType), target, hhmmRule, Date.now());
+
+        finalizeNotifyLogClaim(notifyKey);
     
         db.prepare(`
           UPDATE notify_settings
@@ -1686,6 +2498,7 @@ async function notifyTick() {
         `).run(r.telegram_user_id, r.group_id);
     
       } catch (e) {
+        releaseNotifyLogClaim(notifyKey);
         const msg = String(e?.message || e);
         db.prepare(`
           UPDATE notify_settings
@@ -1701,6 +2514,8 @@ async function notifyTick() {
 }
 
 setInterval(() => { notifyTick().catch(()=>{}); }, 20000);
+setInterval(() => { scheduleSnapshotTick().catch(()=>{}); }, 45000);
+setTimeout(() => { scheduleSnapshotTick().catch(()=>{}); }, 5000);
 
 app.listen(8000, () => {
   console.log('Backend listening on http://localhost:8000');

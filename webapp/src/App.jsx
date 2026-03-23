@@ -112,6 +112,68 @@ function safeText(s) {
   return (s ?? "").toString().trim();
 }
 
+function normalizeExternalUrl(raw) {
+  const s = safeText(raw);
+  if (!s) return "";
+  if (/^https?:\/\//i.test(s)) return s;
+  if (s.startsWith("//")) return `https:${s}`;
+  return "";
+}
+
+function handleExternalLinkClick(event, href) {
+  if (!href) return;
+  const tg = window.Telegram?.WebApp;
+  if (!tg?.openLink) return;
+  event.preventDefault();
+  tg.openLink(href);
+}
+
+function PairLocationContent({ link, room }) {
+  const normalizedLink = normalizeExternalUrl(link);
+  const roomText = safeText(room);
+
+  if (normalizedLink) {
+    return (
+      <>
+        <span className="pairVisitLinkWrap">
+          <img className="pairVisitLinkIcon" src="/link-ico.svg" alt="" />
+          <a
+            className="pairVisitLink"
+            href={normalizedLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => handleExternalLinkClick(e, normalizedLink)}
+          >
+            ссылка
+          </a>
+        </span>
+        {roomText ? <span className="pairVisitSeparator">•</span> : null}
+        {roomText ? <span className="pairRoomText">{roomText}</span> : null}
+      </>
+    );
+  }
+
+  return roomText || "—";
+}
+
+function shortenGroupedTeacherName(raw) {
+  const full = safeText(raw);
+  if (!full) return "";
+
+  const parts = full.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return full;
+
+  const restLooksShort = parts.slice(1).every((part) => /^[A-ZА-ЯЁ]\.?$/i.test(part));
+  if (restLooksShort) return full;
+
+  const initials = parts
+    .slice(1)
+    .map((part) => `${part.charAt(0).toUpperCase()}.`)
+    .join(" ");
+
+  return initials ? `${parts[0]} ${initials}` : full;
+}
+
 function renderPairNo(n) {
   if (!n) return "";
   return `${n} ПАРА`;
@@ -119,6 +181,22 @@ function renderPairNo(n) {
 
 function formatRuPairDateLine(d) {
   return `${d.getDate()} ${RU_MONTH[d.getMonth()]}`;
+}
+
+function formatScheduleActualAt(ts) {
+  const value = Number(ts);
+  if (!value) return "";
+
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+
+  return d.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function formatDeadlineRu(d) {
@@ -258,6 +336,8 @@ export default function App() {
   const [hasPairs, setHasPairs] = useState(false);
   const [pairsLoading, setPairsLoading] = useState(false);
   const [pairs, setPairs] = useState([]); // <-- NEW
+  const [scheduleActualAt, setScheduleActualAt] = useState(null);
+  const [scheduleActualWarning, setScheduleActualWarning] = useState("");
 
   // calendar (full screen like mock)
   const [calendarOpen, setCalendarOpen] = useState(false);
@@ -455,11 +535,13 @@ export default function App() {
       });
       const res = await r.json();
   
-      if (r.ok) {
+      if (r.ok && res.ok) {
         const items = res.items || [];
         setPairs(items);
         setHasPairs(items.length > 0);
         setPairsEmptyText("На текущую дату пар не найдено");
+        setScheduleActualAt(res?.actualAt || null);
+        setScheduleActualWarning(String(res?.warning || ""));
       } else {
         setPairs([]);
         setHasPairs(false);
@@ -467,11 +549,15 @@ export default function App() {
           ? "Время ожидания ответа от API превышено"
           : "На текущую дату пар не найдено"
         );
+        setScheduleActualAt(null);
+        setScheduleActualWarning("");
       }
     } catch {
       setPairs([]);
       setHasPairs(false);
       setPairsEmptyText("Время ожидания ответа от API превышено");
+      setScheduleActualAt(null);
+      setScheduleActualWarning("");
     } finally {
       setPairsLoading(false);
     }
@@ -802,7 +888,7 @@ const removeHomeworkFile = async (fileId) => {
           pair_title: pair.title || "",
           pair_time: pair.time || "",
           pair_no: pair.pair_no ?? null,
-          pair_teacher: pair.teacher || "",
+          pair_teacher: pair.hw_teacher ?? pair.teacher ?? "",
           pair_type: pair.type || "",
         }),
       });
@@ -1443,6 +1529,14 @@ const removeHomeworkFile = async (fileId) => {
         </div>
 
         <div className="dateLine">{formatRuLine(selectedDate)}</div>
+        {scheduleActualAt ? (
+          <div className={`scheduleActualLine ${scheduleActualWarning ? "isSaved" : ""}`}>
+            Актуально на {formatScheduleActualAt(scheduleActualAt)}
+          </div>
+        ) : null}
+        {scheduleActualWarning ? (
+          <div className="scheduleActualWarn">{scheduleActualWarning}</div>
+        ) : null}
 
         <div
           className={`scheduleBody ${hasPairs ? "hasPairs" : "noPairs"} ${pairsLoading ? "isLoading" : ""}`}
@@ -1453,55 +1547,95 @@ const removeHomeworkFile = async (fileId) => {
             "Проверяем пары…"
           ) : hasPairs ? (
             <div className="pairsList">
-              {pairs.map((p, idx) => (
-                <div className="pairBlock" key={`${p.time}-${idx}`}>
-                  <div className="pairCard">
-                    <div className="pairTop">
-                      <div className="pairMeta">
-                        <img className="pairIcon" src="/pair-icon.png" alt="" />
-                        <span className="pairType">{p.type || "ПАРА"}</span>
-                        <span className="pairDot">•</span>
-                        <span className="pairNo">{p.pair_no ? `${p.pair_no} ПАРА` : "ПАРА"}</span>
+              {pairs.map((p, idx) => {
+                const pairVariants = Array.isArray(p.variants)
+                  ? p.variants.filter((variant) => (
+                    safeText(variant?.teacher) ||
+                    safeText(variant?.room) ||
+                    normalizeExternalUrl(variant?.link)
+                  ))
+                  : [];
+                const showVariantList = pairVariants.length > 1;
+                const pairLink = normalizeExternalUrl(p.link);
+                const pairRoom = safeText(p.room);
+                const pairTeacher = safeText(p.teacher);
+
+                return (
+                  <div className="pairBlock" key={`${p.time}-${idx}`}>
+                    <div className="pairCard">
+                      <div className="pairTop">
+                        <div className="pairMeta">
+                          <img className="pairIcon" src="/pair-icon.png" alt="" />
+                          <span className="pairType">{p.type || "ПАРА"}</span>
+                          <span className="pairDot">•</span>
+                          <span className="pairNo">{p.pair_no ? `${p.pair_no} ПАРА` : "ПАРА"}</span>
+                        </div>
+
+                        <button
+                          className="pairAddBtn"
+                          aria-label="add"
+                          type="button"
+                          onClick={() => openAddHwForPair(p)}
+                        >
+                          <img src="/add-hw-to-pair.png" alt="+" />
+                        </button>
                       </div>
 
-                      <button
-                        className="pairAddBtn"
-                        aria-label="add"
-                        type="button"
-                        onClick={() => openAddHwForPair(p)}
-                      >
-                        <img src="/add-hw-to-pair.png" alt="+" />
-                      </button>
+                      <div className="pairTitle">{p.title || "Без названия"}</div>
+                      {showVariantList ? (
+                        <div className="pairVariantList">
+                          {pairVariants.map((variant, variantIdx) => (
+                            <div
+                              className="pairVariantRow"
+                              key={`${variant.teacher || "teacher"}-${variant.room || "room"}-${variant.link || "link"}-${variantIdx}`}
+                            >
+                              <span className="pairVariantTeacher">
+                                {shortenGroupedTeacherName(variant.teacher) || "Преподаватель не указан"}
+                              </span>
+                              {(safeText(variant.room) || normalizeExternalUrl(variant.link)) ? (
+                                <span className="pairVariantSeparator">•</span>
+                              ) : null}
+                              {(safeText(variant.room) || normalizeExternalUrl(variant.link)) ? (
+                                <span className="pairVariantLocation">
+                                  <PairLocationContent link={variant.link} room={variant.room} />
+                                </span>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="pairTeacher">{pairTeacher || "—"}</div>
+                          <div className="pairRoom">
+                            <PairLocationContent link={pairLink} room={pairRoom} />
+                          </div>
+                        </>
+                      )}
+                      <div className="pairTime">{p.time || ""}</div>
                     </div>
 
-                    <div className="pairTitle">{p.title || "Без названия"}</div>
-                    <div className="pairTeacher">{p.teacher || "—"}</div>
-                    <div className="pairRoom">{p.room || "—"}</div>
-                    <div className="pairTime">{p.time || ""}</div>
-                  </div>
-
-                  {Array.isArray(p.homeworks) && p.homeworks.length > 0 && (
-                    <div className="hwList">
-                      {p.homeworks.map((h) => (
-                        <div className="hwCard" key={h.id}>
-                          <div className="hwTop">
-                            <div className="hwMeta">
-                              <img className="hwIcon" src="/hw-icon.png" alt="" />
-                              <span className="hwMetaText">Задание</span>
-                              <span className="hwDot">•</span>
-                              <span className="hwMetaText">{p.title || ""}</span>
+                    {Array.isArray(p.homeworks) && p.homeworks.length > 0 && (
+                      <div className="hwList">
+                        {p.homeworks.map((h) => (
+                          <div className="hwCard" key={h.id}>
+                            <div className="hwTop">
+                              <div className="hwMeta">
+                                <img className="hwIcon" src="/hw-icon.png" alt="" />
+                                <span className="hwMetaText">Задание</span>
+                                <span className="hwDot">•</span>
+                                <span className="hwMetaText">{p.title || ""}</span>
+                              </div>
                             </div>
-                          </div>
 
-                          {/* кнопка теперь отдельно — позиционируется absolute снизу справа */}
-                          <button
-                            className="hwEditBtn"
-                            type="button"
-                            aria-label="edit"
-                            onClick={() => openEditHw(p, h)}
-                          >
-                            <img src="/edit-hw-to-pair.png" alt="edit" />
-                          </button>
+                            {/* кнопка теперь отдельно — позиционируется absolute снизу справа */}
+                            <button
+                              className="hwEditBtn"
+                              type="button"
+                              aria-label="edit"
+                              onClick={() => openEditHw(p, h)}
+                            >
+                              <img src="/edit-hw-to-pair.png" alt="edit" />
+                            </button>
 
                           <div className="hwTitle">{h.text}</div>
 
@@ -1547,7 +1681,8 @@ const removeHomeworkFile = async (fileId) => {
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             pairsEmptyText

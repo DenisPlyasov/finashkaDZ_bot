@@ -518,6 +518,27 @@ html, body, #root {
   font-size: 15px; /* было 18px */
 }
 
+.scheduleActualLine{
+  margin-top: 6px;
+  padding-left: 2px;
+  color: rgba(255,255,255,0.42);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.scheduleActualLine.isSaved{
+  color: rgba(255,255,255,0.58);
+}
+
+.scheduleActualWarn{
+  margin-top: 4px;
+  padding-left: 2px;
+  color: rgba(255,255,255,0.48);
+  font-weight: 700;
+  font-size: 12px;
+}
+
 
 .scheduleBody {
   margin-top: 22px;
@@ -725,7 +746,7 @@ html, body, #root {
   max-width: none;
   display: grid;
   gap: 14px;
-  padding: 0;          /* если нужно строго по краям */
+  padding: 0;
 }
 .pairCard{
   background: rgba(255,255,255,0.08);
@@ -749,7 +770,7 @@ html, body, #root {
   font-weight: 900;
   letter-spacing: 0.6px;
   text-transform: uppercase;
-  font-size: 12px; /* было ~14 => -5 */
+  font-size: 12px;
 }
 
 .pairIcon{
@@ -779,14 +800,14 @@ html, body, #root {
 
 .pairTitle{
   font-weight: 900;
-  font-size: 16px; /* было ~22 => -10 */
+  font-size: 16px;
   line-height: 1.15;
   color: rgba(255,255,255,0.95);
   margin-bottom: 6px;
 }
 
 .pairTeacher{
-  font-size: 14px; /* -5 */
+  font-size: 14px;
   font-weight: 700;
   color: rgba(255,255,255,0.60);
   line-height: 1.25;
@@ -794,15 +815,83 @@ html, body, #root {
 
 .pairRoom{
   margin-top: 3px;
-  font-size: 14px; /* -5 */
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.62);
+  line-height: 1.25;
+}
+
+.pairVariantList{
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+  margin-bottom: 2px;
+  padding-left: 30px;
+}
+
+.pairVariantRow{
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pairVariantTeacher{
+  font-size: 14px;
   font-weight: 700;
   color: rgba(255,255,255,0.60);
   line-height: 1.25;
 }
 
+.pairVariantSeparator{
+  opacity: 0.55;
+}
+
+.pairVariantLocation{
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.62);
+  line-height: 1.25;
+}
+
+.pairVisitLinkWrap{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pairVisitLinkIcon{
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+.pairVisitLink{
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1.5px;
+}
+
+.pairVisitSeparator{
+  opacity: 0.55;
+}
+
+.pairRoomText{
+  min-width: 0;
+}
+
 .pairTime{
   margin-top: 6px;
-  font-size: 15px; /* -5 */
+  font-size: 15px;
   font-weight: 900;
   color: #6b5cff;
   letter-spacing: 0.2px;

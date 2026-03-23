@@ -43,6 +43,24 @@ def _first_str(*vals) -> str:
             return v.strip()
     return ""
 
+def _ensure_list(x) -> List[Any]:
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return x
+    # иногда fa_api может вернуть dict с items/results
+    if isinstance(x, dict):
+        for k in ("items", "results", "data"):
+            v = x.get(k)
+            if isinstance(v, list):
+                return v
+        return []
+    # иногда возвращают строку (ошибка/HTML/сообщение) — считаем пусто
+    return []
+
+def _ensure_dict(x) -> Dict[str, Any]:
+    return x if isinstance(x, dict) else {}
+
 def _hhmm_to_min(s: str) -> Optional[int]:
     """
     Принимает 'HH:MM' (или 'H:MM') и возвращает минуты от 00:00.
@@ -344,6 +362,15 @@ def _extract_room(lesson: dict) -> str:
         lesson.get("cabinet"),
     )
 
+def _extract_link(lesson: dict) -> str:
+    return _first_str(
+        lesson.get("url1"),
+        lesson.get("url2"),
+        lesson.get("link"),
+        lesson.get("url"),
+        lesson.get("href"),
+    )
+
 def _to_upper_type(norm: str) -> str:
     x = (norm or "").strip().lower()
     if not x:
@@ -378,6 +405,7 @@ def _normalize_lesson(lesson: dict) -> Dict[str, Any]:
         "title": _extract_title(lesson),
         "teacher": _get_teacher_full(lesson),
         "room": _extract_room(lesson),
+        "link": _extract_link(lesson),
         "time": time_range,
         "date": _norm_date(_first_str(lesson.get("date"), lesson.get("day"), lesson.get("lesson_date"), "")),
     }
@@ -399,11 +427,20 @@ def main():
             query = " ".join(sys.argv[2:]).strip()
 
             if cmd == "search_group":
-                items = _call_with_timeout(fa.search_group, query) or []
+                raw = _call_with_timeout(fa.search_group, query)
             else:
-                items = _call_with_timeout(fa.search_teacher, query) or []
+                raw = _call_with_timeout(fa.search_teacher, query)
 
-            out = [{"id": it.get("id"), "title": it.get("label") or it.get("name") or it.get("title") or ""} for it in items]
+            items = _ensure_list(raw)
+
+            out = []
+            for it in items:
+                d = _ensure_dict(it)
+                out.append({
+                    "id": d.get("id"),
+                    "title": d.get("label") or d.get("name") or d.get("title") or ""
+                })
+
             print(json.dumps({"ok": True, "items": out}, ensure_ascii=False))
             return
 
