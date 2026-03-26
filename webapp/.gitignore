@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+*.sqlite-wal
+*.sqlite-shm
+backend/.cache/
+backend/uploads/

@@ -255,3 +255,1887 @@ html, body, #root {
 .suggestItem:hover {
   background: rgba(255,255,255,0.06);
 }
+
+/* ===== Schedule screen (макет) ===== */
+.scheduleShell {
+  height: 100vh;
+  width: 100%;
+  max-width: 100vw;
+  background: #000;
+  color: #fff;
+  padding: 12px 14px 18px;
+  overflow-x: hidden; /* чтобы ничего не сжимало из-за горизонтального скролла */
+}
+
+.scheduleBody {
+  margin-top: 22px;
+  height: calc(100vh - 210px);
+  display: grid;
+  place-items: center;
+  width: 100%;
+}
+
+.topBar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 6px;
+  min-height: 44px;
+}
+
+.topTitle {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  width: min(320px, 76vw); /* чуть больше, чтобы группа не обрезалась */
+  pointer-events: auto;
+}
+
+/* .topTitleMain { Расписание
+  font-size: 24px;
+  font-weight: 900;
+  letter-spacing: 0.2px;
+  line-height: 1.1;
+}
+
+.topTitleSub {
+  margin-top: 4px;
+  background: transparent;
+  border: 0;
+  color: rgba(255,255,255,0.45);
+  font-weight: 800;
+  font-size: 18px;
+  cursor: pointer;
+} */
+
+.topTitleMain {
+  font-size: 14px;     /* было 24px => -10px */
+  font-weight: 900;
+  letter-spacing: 0.2px;
+  line-height: 1.05;
+  opacity: 0.92;
+}
+
+.topTitleSub {
+  margin-top: 2px;     /* было 4px — ближе */
+  background: transparent;
+  border: 0;
+  color: rgba(255,255,255,0.55);
+  font-weight: 900;
+  font-size: 18px;     /* оставляем крупным для кликабельности */
+  cursor: pointer;
+  padding: 6px 10px;   /* ✅ увеличиваем тач-зону */
+  border-radius: 12px;
+}
+
+.topActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+/* .iconBtn { Размер плюса лупа расписание
+  width: 44px;
+  height: 44px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.iconBtn img {
+  width: 34px;
+  height: 34px;
+  opacity: 0.95;
+} */
+
+.iconBtn {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.iconBtn img {
+  width: 24px;   /* было 34px (~-30%) */
+  height: 24px;  /* было 34px */
+  opacity: 0.95;
+}
+
+/* .weekRow {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 10px;
+  margin-top: 18px;
+  padding: 0 2px;
+} */
+
+.weekRow {
+  /* общие переменные в одном месте */
+  --gap: 10px;
+  --pad: 2px;
+
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: var(--gap);
+  padding: 0 var(--pad);
+}
+
+.weekIndicator {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #fff;
+  border-radius: 14px;
+  z-index: 0;
+  pointer-events: none;
+
+  /* ВАЖНО: вычитаем padding слева+справа */
+  --cell: calc((100% - (var(--gap) * 6) - (var(--pad) * 2)) / 7);
+
+  width: var(--cell);
+  left: var(--pad);
+
+  transform: translateX(calc((var(--cell) + var(--gap)) * var(--i)));
+  transition: transform 220ms cubic-bezier(.22, 1, .36, 1);
+  will-change: transform;
+}
+
+/* .dayCell {
+  border: 0;
+  background: transparent;
+  border-radius: 14px;
+  padding: 10px 0 8px;
+  color: rgba(255,255,255,0.55);
+  cursor: pointer;
+  text-align: center;
+} */
+
+/* .dayCell .dayNum {
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.dayCell .dayDow {
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 800;
+  opacity: 0.85;
+} */
+
+.dayCell .dayNum {
+  font-size: 19px;   /* было 22px */
+  font-weight: 900;
+  line-height: 1;
+}
+
+.dayCell .dayDow {
+  margin-top: 6px;
+  font-size: 11px;   /* было 14px */
+  font-weight: 800;
+  opacity: 0.85;
+}
+
+
+/* .weekIndicator {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: #fff;
+  border-radius: 14px;
+  z-index: 0;
+  will-change: left;
+
+  --gap: 10px;
+  --pad: 2px;
+  --cell: calc((100% - (var(--gap) * 6)) / 7);
+
+  width: calc(var(--cell) - 0px);
+
+  left: calc(var(--pad) + (var(--cell) + var(--gap)) * var(--i));
+  transition: left 220ms cubic-bezier(.22, 1, .36, 1);
+} */
+
+
+/* .dayCell.selected {
+  background: #fff;
+  color: #000;
+}
+
+.dayCell.selected .dayDow {
+  color: #000;
+  opacity: 1;
+} */
+
+.dayCell {
+  border: 0;
+  background: transparent;     /* фон больше не рисуем тут */
+  border-radius: 14px;
+  padding: 10px 0 8px;
+  color: rgba(255,255,255,0.55);
+  cursor: pointer;
+  text-align: center;
+  position: relative;
+  z-index: 1;                  /* ✅ поверх индикатора */
+  transition: color 180ms ease;
+}
+
+.dayCell.selected {
+  color: #000;                 /* текст поверх белого */
+}
+
+.dayCell.selected .dayDow {
+  color: #000;
+  opacity: 1;
+}
+
+/* .dateLine {
+  margin-top: 14px;
+  padding-left: 2px;
+  color: rgba(255,255,255,0.35);
+  font-weight: 800;
+  font-size: 18px;
+} */
+
+
+.dateLine {
+  margin-top: 14px;
+  padding-left: 2px;
+  color: rgba(255,255,255,0.35);
+  font-weight: 800;
+  font-size: 15px; /* было 18px */
+}
+
+.scheduleActualLine{
+  margin-top: 6px;
+  padding-left: 2px;
+  color: rgba(255,255,255,0.42);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.scheduleActualLine.isSaved{
+  color: rgba(255,255,255,0.58);
+}
+
+.scheduleActualWarn{
+  margin-top: 4px;
+  padding-left: 2px;
+  color: rgba(255,255,255,0.48);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+
+.scheduleBody {
+  margin-top: 22px;
+  height: calc(100vh - 210px);
+  display: grid;
+  place-items: center;
+}
+
+/* Центровка текста загрузки/пустого состояния */
+.scheduleBody.isLoading{
+  place-items: center !important;
+  align-content: center !important;
+  overflow: hidden !important;
+  padding: 0 !important;
+}
+
+.scheduleHint {
+  font-size: 22px;
+  font-weight: 900;
+  text-align: center;
+  color: rgba(255,255,255,0.92);
+  padding: 0 16px;
+}
+
+/* dropdown history */
+/* dropdown history — БЕЗ "жидкого стекла" */
+.historyDropdown {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: 62px;
+  width: min(340px, 92vw);
+
+  /* было: rgba(...) => делаем непрозрачным */
+  background: #151515;
+
+  /* убираем любые эффекты стекла */
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 18px;
+  overflow: hidden;
+  z-index: 50;
+
+  /* тень более “обычная”, без ощущения стекла */
+  box-shadow: 0 14px 28px rgba(0,0,0,0.75);
+}
+
+.historyItem {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: rgba(255,255,255,0.92);
+  padding: 12px 14px;           /* чуть компактнее */
+  text-align: left;
+  font-weight: 900;
+  font-size: 15px;              /* можно 15 вместо 16 */
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.historyItem:hover {
+  background: rgba(255,255,255,0.05);
+}
+
+.historyItem + .historyItem {
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+
+
+.historyTag {
+  color: rgba(255,255,255,0.45);
+  font-size: 12px;
+  font-weight: 900;
+  margin-left: 10px;
+}
+
+.historyEmpty {
+  padding: 14px;
+  color: rgba(255,255,255,0.55);
+  font-weight: 800;
+}
+
+/* анимация фокуса при смене даты */
+.scheduleHint.anim {
+  animation: pop 180ms ease-out;
+}
+
+.scheduleHint.anim.left {
+  animation: slideLeft 200ms ease-out;
+}
+
+.scheduleHint.anim.right {
+  animation: slideRight 200ms ease-out;
+}
+
+@keyframes pop {
+  from { transform: scale(0.98); opacity: 0.85; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+@keyframes slideLeft {
+  from { transform: translateX(-10px) scale(0.99); opacity: 0.85; }
+  to { transform: translateX(0) scale(1); opacity: 1; }
+}
+
+@keyframes slideRight {
+  from { transform: translateX(10px) scale(0.99); opacity: 0.85; }
+  to { transform: translateX(0) scale(1); opacity: 1; }
+}
+
+/* ===== Pairs list (как на скрине) ===== */
+
+.scheduleBody.hasPairs{
+  place-items: start stretch;
+  height: calc(100vh - 210px);
+  overflow-y: auto;
+  padding: 6px 0 18px;
+  -webkit-overflow-scrolling: touch;
+}
+
+
+.pairLeft{
+  min-width: 0;
+}
+
+.pairMeta{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(255,255,255,0.55);
+  font-weight: 900;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.pairIcon{
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.pairDot{
+  opacity: 0.7;
+}
+
+.pairTitle{
+  margin-top: 8px;
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1.15;
+  color: rgba(255,255,255,0.96);
+  word-break: break-word;
+}
+
+.pairTeacher,
+.pairRoom{
+  margin-top: 4px;
+  font-size: 16px;
+  font-weight: 800;
+  color: rgba(255,255,255,0.55);
+  word-break: break-word;
+}
+
+.pairTime{
+  margin-top: 10px;
+  font-size: 20px;
+  font-weight: 900;
+  color: var(--primary);
+}
+
+.pairRight{
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+
+.pairAddBtn{
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  border: 2px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.02);
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.pairAddBtn img{
+  width: 24px;
+  height: 24px;
+  opacity: 0.9;
+}
+
+
+/* ===== Pairs list (как на скрине) ===== */
+/* ===== Pairs list (как на скрине) ===== */
+.pairsList{
+  width: 100%;
+  max-width: none;
+  display: grid;
+  gap: 14px;
+  padding: 0;
+}
+.pairCard{
+  background: rgba(255,255,255,0.08);
+  border-radius: 18px;
+  padding: 14px 14px 12px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.45);
+}
+
+.pairTop{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.pairMeta{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(255,255,255,0.55);
+  font-weight: 900;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  font-size: 12px;
+}
+
+.pairIcon{
+  width: 14px;
+  height: 14px;
+  opacity: 0.95;
+}
+
+.pairDot{ opacity: 0.55; }
+
+.pairAddBtn{
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  border: 2px solid rgba(255,255,255,0.18);
+  background: transparent;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.pairAddBtn img{
+  width: 22px;
+  height: 22px;
+  opacity: 0.9;
+}
+
+.pairTitle{
+  font-weight: 900;
+  font-size: 16px;
+  line-height: 1.15;
+  color: rgba(255,255,255,0.95);
+  margin-bottom: 6px;
+}
+
+.pairTeacher{
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.60);
+  line-height: 1.25;
+}
+
+.pairRoom{
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.62);
+  line-height: 1.25;
+}
+
+.pairVariantList{
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+  margin-bottom: 2px;
+  padding-left: 30px;
+}
+
+.pairVariantRow{
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pairVariantTeacher{
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.60);
+  line-height: 1.25;
+}
+
+.pairVariantSeparator{
+  opacity: 0.55;
+}
+
+.pairVariantLocation{
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.62);
+  line-height: 1.25;
+}
+
+.pairVisitLinkWrap{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pairVisitLinkIcon{
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+.pairVisitLink{
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1.5px;
+}
+
+.pairVisitSeparator{
+  opacity: 0.55;
+}
+
+.pairRoomText{
+  min-width: 0;
+}
+
+.pairTime{
+  margin-top: 6px;
+  font-size: 15px;
+  font-weight: 900;
+  color: #6b5cff;
+  letter-spacing: 0.2px;
+}
+
+html, body {
+  width: 100%;
+  margin: 0;
+}
+
+#root {
+  width: 100%;
+  max-width: none;   /* ✅ убираем ограничение */
+  margin: 0;         /* ✅ убираем центрирование контейнера */
+  padding: 0;        /* ✅ убираем внутренние поля, которые "съедают" ширину */
+}
+
+
+/* ===== Fullscreen Calendar (like mock) ===== */
+.calFull{
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: #111;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+}
+
+.calTop{
+  height: 56px;
+  padding: 12px 16px 8px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+}
+
+.calTopLeft{ height: 1px; }
+
+.calTopTitle{
+  font-weight: 900;
+  font-size: 18px;
+  text-align: center;
+  opacity: 0.95;
+}
+
+.calTopHide{
+  justify-self: end;
+  border: 0;
+  background: transparent;
+  font-weight: 900;
+  font-size: 18px;
+  color: var(--primary);
+  padding: 8px 10px;
+  border-radius: 12px;
+}
+
+.calTopHide:active{
+  opacity: 0.75;
+}
+
+.calScroll{
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 16px 0;
+}
+
+.calMonthBlock{
+  padding: 10px 0 24px;
+}
+
+.calMonthTitle{
+  font-size: 40px;
+  font-weight: 1000;
+  letter-spacing: -0.6px;
+  margin: 6px 0 10px;
+  opacity: 0.98;
+}
+
+.calDowRow{
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 0 2px;
+}
+
+.calDowCell{
+  text-align: center;
+  font-size: 16px;
+  font-weight: 900;
+  color: rgba(255,255,255,0.35);
+}
+
+.calGrid{
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 16px 10px; /* вертикаль/горизонталь */
+  padding: 6px 2px 0;
+}
+
+.calEmpty{
+  height: 44px;
+}
+
+.calDay{
+  height: 44px;
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  font-size: 22px;
+  font-weight: 900;
+  color: rgba(107,92,255,0.95);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.calDay:active{
+  transform: scale(0.98);
+  opacity: 0.85;
+}
+
+.calDay.sel{
+  background: rgba(107,92,255,0.95);
+  color: #fff;
+}
+
+.calBottomPad{
+  height: 24px;
+}
+
+/* ===== Calendar tweaks ===== */
+
+/* 7 колонок всегда, без сжатия до 4 */
+.calDowRow,
+.calGrid{
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+/* Убираем "пропуск" между днями недели и числами */
+.calDowRow{
+  gap: 10px;
+  margin-bottom: 0;      /* было 10px */
+  padding: 0 2px;
+}
+
+.calGrid{
+  gap: 10px 10px;        /* было 16px 10px */
+  padding: 0 2px 0;      /* было 6px сверху */
+  align-items: stretch;
+}
+
+/* Уменьшаем шрифты календаря на 10px (кроме "Календарь" и "Скрыть") */
+.calMonthTitle{
+  font-size: 30px;       /* было 40px */
+  margin: 6px 0 8px;
+}
+
+.calDowCell{
+  font-size: 15px;        /* было 16px */
+  font-weight: 900;
+}
+
+/* День — чтобы не ломалось в 4 колонки */
+.calDay{
+  width: 100%;
+  height: 34px;          /* было 44px */
+  font-size: 15px;       /* было 22px */
+  border-radius: 999px;
+}
+
+.calEmpty{
+  height: 34px;          /* было 44px */
+}
+
+/* Немного компактнее блок месяца */
+.calMonthBlock{
+  padding: 8px 0 18px;   /* было 10px 0 24px */
+}
+
+/* === FIX: центрируем синий кружок на выбранной дате === */
+.calDay{
+  position: relative;
+  isolation: isolate;     /* чтобы ::before с z-index:-1 был позади текста */
+  padding: 0;             /* на всякий случай убираем смещения */
+  line-height: 1;         /* чтобы цифра не "плавала" по вертикали */
+}
+
+/* кружок-выделение */
+.calDay::before{
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+
+  height: 100%;
+  width: auto;
+  aspect-ratio: 1 / 1;    /* width вычислится из height => всегда круг */
+
+  border-radius: 999px;
+  background: transparent;
+  z-index: -1;
+}
+
+/* выбранный день */
+.calDay.sel{
+  background: transparent !important;  /* убираем "пилюлю" */
+  color: #fff;
+}
+
+.calDay.sel::before{
+  background: rgba(107,92,255,0.95);   /* твой primary */
+}
+
+.pairCard{
+  position: relative; /* база для absolute */
+  padding-bottom: 12px; /* оставь как у тебя или чуть увеличь, если нужно */
+}
+
+/* кнопка — в правый низ карточки */
+.pairAddBtn{
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  margin: 0 !important;
+}
+
+/* чтобы снизу справа не наезжало на время */
+.pairTime{
+  padding-right: 60px; /* место под кнопку (46px + воздух) */
+}
+
+/* ===== HW Add Screen ===== */
+.hwFull{
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: #000;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+}
+
+.hwTopBar{
+  height: 64px;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+}
+
+.hwClose{
+  border: 0;
+  background: transparent;
+  color: rgba(120,160,255,0.95);
+  font-weight: 900;
+  font-size: 18px;
+  padding: 8px 10px;
+}
+
+.hwTopTitle{
+  text-align: center;
+  font-weight: 900;
+  font-size: 18px;
+  opacity: 0.95;
+  line-height: 1.1;
+}
+
+.hwTopSub{
+  margin-top: 2px;
+  font-weight: 900;
+  font-size: 14px;
+  opacity: 0.55;
+}
+
+.hwTopRight{ width: 44px; height: 1px; }
+
+.hwContent{
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 14px 14px 18px;
+}
+
+.hwHeader{
+  text-align: center;
+  font-weight: 900;
+  font-size: 20px;
+  margin: 10px 0 12px;
+}
+
+.hwGroup{
+  text-decoration: underline;
+}
+
+.hwPairCard{
+  margin-bottom: 18px;
+
+  background: rgba(255,255,255,0.08);
+  border-radius: 18px;
+  padding: 14px 14px 12px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.45);
+}
+
+.hwPairMeta{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 900;
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.hwSquare{
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: rgba(107,92,255,0.95);
+  flex: 0 0 auto;
+}
+
+.hwPairTitle{
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 900;
+  line-height: 1.15;
+}
+
+.hwPairTeacher{
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 800;
+  opacity: 0.55;
+}
+
+.hwPairLine{
+  margin-top: 8px;
+  font-size: 16px;
+  font-weight: 900;
+  color: rgba(107,92,255,0.95);
+}
+
+.hwSectionTitle{
+  text-align: center;
+  font-size: 18px;
+  font-weight: 900;
+  margin: 6px 0 12px;
+}
+
+.hwTextarea{
+  width: 100%;
+  height: 180px;
+  resize: none;
+  border-radius: 16px;
+  padding: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.25);
+  color: rgba(255,255,255,0.92);
+  font-size: 16px;
+  outline: none;
+  margin-bottom: 12px;
+}
+
+.hwTextarea::placeholder{
+  color: rgba(255,255,255,0.35);
+  font-weight: 800;
+}
+
+.hwActionRow{
+  width: 100%;
+  border-radius: 14px;
+  padding: 14px 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: transparent;
+  color: rgba(255,255,255,0.65);
+  font-weight: 900;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.hwPlus{
+  font-size: 22px;
+  font-weight: 1000;
+  opacity: 0.85;
+}
+
+.hwBottomButtons{
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.hwBtn{
+  border: 0;
+  border-radius: 16px;
+  padding: 16px 14px;
+  font-weight: 1000;
+  font-size: 18px;
+}
+
+.hwBtnPrimary{
+  background: rgba(107,92,255,0.95);
+  color: #fff;
+}
+
+.hwBtnSecondary{
+  background: rgba(255,255,255,0.35);
+  color: rgba(255,255,255,0.95);
+}
+
+/* confirm cancel modal */
+.hwModalOverlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: grid;
+  place-items: center;
+  z-index: 1300;
+  padding: 18px;
+}
+
+.hwModal{
+  width: min(420px, 92vw);
+  background: #151515;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 18px;
+  box-shadow: 0 14px 28px rgba(0,0,0,0.75);
+  padding: 16px;
+}
+
+.hwModalText{
+  font-weight: 900;
+  font-size: 16px;
+  color: rgba(255,255,255,0.92);
+  line-height: 1.35;
+  margin-bottom: 14px;
+}
+
+.hwModalBtns{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* ===== HW under pair ===== */
+.hwList{
+  margin-top: 12px;
+  display: grid;
+  gap: 12px;
+}
+
+.hwCard{
+  background: rgba(255,255,255,0.06);
+  border-radius: 18px;
+  padding: 12px 12px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.40);
+}
+
+.hwTop{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.hwMeta{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 900;
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
+}
+
+.hwIcon{
+  width: 14px;
+  height: 14px;
+  opacity: 0.95;
+}
+
+.hwEditBtn{
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  border: 2px solid rgba(255,255,255,0.18);
+  background: transparent;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  opacity: 0.65;
+}
+
+.hwEditBtn img{
+  width: 24px;
+  height: 24px;
+  opacity: 0.9;
+}
+
+.hwTitle{
+  margin-top: 8px;
+  font-weight: 900;
+  font-size: 16px;
+  line-height: 1.15;
+  padding-right: 60px; /* место под кнопку редактирования */
+  word-break: break-word;
+}
+
+.hwDeadline{
+  margin-top: 10px;
+  font-weight: 1000;
+  font-size: 16px;
+  color: rgba(107,92,255,0.95);
+}
+
+.pairBlock{
+  display: grid;
+  gap: 12px; /* расстояние между карточкой пары и блоком задания */
+}
+
+/* чтобы hwList был именно "под парой", как отдельный блок */
+.hwList{
+  margin-top: 0;        /* раньше было 12px — теперь gap это уже даёт */
+  display: grid;
+  gap: 12px;
+}
+
+/* === Make HW card look like Pair card === */
+.hwCard{
+  background: rgba(255,255,255,0.08);          /* как у .pairCard */
+  border-radius: 18px;                         /* уже совпадает, но оставим */
+  padding: 15px 15px 12px;                     /* как у .pairCard */
+  box-shadow: 0 12px 26px rgba(0,0,0,0.45);    /* как у .pairCard */
+}
+
+/* === Pencil button border same as Plus button === */
+.hwEditBtn{
+  border: 2px solid rgba(255,255,255,0.18);    /* как у .pairAddBtn */
+  background: transparent;                     /* как у .pairAddBtn */
+  opacity: 1;                                  /* убираем “бледность” */
+}
+
+.hwEditBtn img{
+  width: 22px;
+  height: 22px;
+}
+
+/* === HW card: pencil button like plus (bottom-right) === */
+.hwCard{
+  position: relative;             /* база для absolute */
+  padding-bottom: 12px;           /* оставляем воздух снизу */
+}
+
+/* верхняя строка теперь без кнопки справа */
+.hwTop{
+  justify-content: flex-start;    /* чтобы мета не растягивалась */
+}
+
+/* кнопка карандаша — в правый низ */
+.hwEditBtn{
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  margin: 0 !important;
+  opacity: 1;
+}
+
+/* чтобы "К дедлайну" не залезало под кнопку */
+.hwDeadline{
+  padding-right: 60px;
+}
+
+/* ===== Files (name screen) ===== */
+.fileFull{
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  background: #000;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+}
+
+.fileContent{
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 18px 14px 18px;
+}
+
+.fileTitle{
+  text-align: center;
+  font-weight: 1000;
+  font-size: 20px;
+  margin: 8px 0 14px;
+}
+
+.fileCard{
+  background: rgba(255,255,255,0.08);
+  border-radius: 18px;
+  padding: 14px 14px 12px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.45);
+  margin-bottom: 14px;
+}
+
+.fileRow{
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.fileLabel{
+  font-weight: 900;
+  color: rgba(255,255,255,0.55);
+  font-size: 14px;
+}
+
+.fileValue{
+  font-weight: 900;
+  color: rgba(255,255,255,0.92);
+  font-size: 14px;
+  text-align: right;
+  word-break: break-word;
+}
+
+.fileSectionTitle{
+  text-align: center;
+  font-size: 18px;
+  font-weight: 900;
+  margin: 10px 0 10px;
+}
+
+.fileInput{
+  width: 100%;
+  padding: 14px 14px;
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  outline: none;
+  background: rgba(0,0,0,0.25);
+  color: rgba(255,255,255,0.92);
+  font-size: 16px;
+  margin-bottom: 14px;
+}
+
+.fileBtns{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+/* ===== Files list inside HW screen ===== */
+.hwFilesList{
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.hwFileItem{
+  background: rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 12px 12px;
+  box-shadow: 0 10px 20px rgba(0,0,0,0.35);
+}
+
+.hwFileName{
+  font-weight: 1000;
+  font-size: 15px;
+  color: rgba(255,255,255,0.95);
+  line-height: 1.2;
+}
+
+.hwFileMeta{
+  margin-top: 4px;
+  font-weight: 900;
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
+  word-break: break-word;
+}
+
+/* ===== File row like mock: icon + original name + X on grid ===== */
+
+.hwFileRow{
+  background: rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 12px 12px;
+  box-shadow: 0 10px 20px rgba(0,0,0,0.35);
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hwFileLeft{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.hwFileIcon{
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  opacity: 0.9;
+}
+
+.hwFileTitle{
+  font-weight: 1000;
+  font-size: 14px;
+  color: rgba(255,255,255,0.95);
+  line-height: 1.2;
+
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+
+  max-width: 70vw; 
+}
+
+/* крестик "за решёткой" */
+.fileRemoveBtn{
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+
+  display: grid;
+  place-items: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.fileRemoveBtn::before{
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+
+  /* сетка */
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.18) 0 1px, transparent 1px 7px),
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.12) 0 1px, transparent 1px 7px);
+  opacity: 0.22;
+}
+
+.fileRemoveBtn span{
+  position: relative;
+  font-size: 18px;
+  font-weight: 1000;
+  line-height: 1;
+  color: rgba(255,255,255,0.92);
+}
+
+.fileRemoveBtn:active{
+  transform: scale(0.98);
+  opacity: 0.85;
+}
+
+/* ===== Attached file chip (как на макете) ===== */
+.hwAttachList{
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+  padding-right: 60px; /* чтобы не залезало под кнопку карандаша */
+}
+
+.hwAttachBtn{
+  width: fit-content;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  max-width: 70vw; 
+  gap: 10px;
+
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.12);
+
+  color: rgba(255,255,255,0.90);
+  font-weight: 900;
+  font-size: 14px;
+
+  cursor: pointer;
+}
+
+.hwAttachBtn:active{
+  transform: scale(0.99);
+  opacity: 0.85;
+}
+
+.hwAttachIcon{
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  opacity: 0.9;
+}
+
+.hwAttachName{
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 100%; 
+}
+
+.hwChecks{
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 14px;
+  text-align: left;
+}
+
+.hwCheckRow{
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-weight: 900;
+  color: rgba(255,255,255,0.85);
+}
+
+.hwCheckRow input{
+  width: 18px;
+  height: 18px;
+}
+
+
+.weekRow{
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+  padding: 0 2px;
+}
+
+.dayCell{
+  border: 0;
+  background: transparent;
+  border-radius: 14px;
+  padding: 10px 0 8px;
+  cursor: pointer;
+  text-align: center;
+
+  position: relative;
+  isolation: isolate; /* важно для ::before */
+  color: rgba(255,255,255,0.55);
+}
+
+/* сама белая плашка */
+.dayCell::before{
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  background: transparent;
+  z-index: -1;
+  transition: background 220ms cubic-bezier(.22, 1, .36, 1);
+}
+
+.dayCell.selected{
+  color: #000;
+}
+
+.dayCell.selected::before{
+  background: #fff;
+}
+
+.dayCell.selected .dayDow{
+  color: #000;
+  opacity: 1;
+}
+
+.topLeftActions{
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.notifyFull{
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  background: #000;
+  color: #fff;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 14px 14px 22px;
+}
+
+.notifyContent{
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.notifyTitle{
+  text-align: center;
+  font-weight: 1000;
+  font-size: 28px;
+  margin: 14px 0 18px;
+}
+
+.notifyCard{
+  background: rgba(255,255,255,0.08);
+  border-radius: 18px;
+  padding: 16px 14px 14px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.45);
+  margin-bottom: 14px;
+}
+
+.notifyCardTitle{
+  font-weight: 1000;
+  font-size: 18px;
+  margin-bottom: 6px;
+}
+
+.notifyCardSub{
+  color: rgba(255,255,255,0.55);
+  font-weight: 800;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.notifyPills{
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.pill{
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  color: rgba(255,255,255,0.88);
+  border-radius: 14px;
+  padding: 10px 12px;
+  font-weight: 1000;
+  cursor: pointer;
+}
+
+.pill.on{
+  border-color: rgba(107,92,255,0.65);
+  background: rgba(107,92,255,0.28);
+}
+
+.notifyPicked{
+  margin-top: 10px;
+  font-weight: 1000;
+  color: rgba(107,92,255,0.95);
+}
+
+.notifySaveBtn{
+  width: 100%;
+  border: 0;
+  border-radius: 16px;
+  padding: 16px 14px;
+  font-weight: 1000;
+  font-size: 18px;
+  background: rgba(107,92,255,0.95);
+  color: #fff;
+  margin-top: 6px;
+}
+
+.notifyDangerBtn{
+  width: 100%;
+  border-radius: 16px;
+  padding: 14px 14px;
+  font-weight: 1000;
+  font-size: 18px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: transparent;
+  color: rgba(255,255,255,0.75);
+  margin-top: 12px;
+}
+
+.topBar { position: relative; }
+
+.topLeftActions,
+.topActions {
+  position: relative;
+  z-index: 5;
+}
+
+/* центр ниже */
+.topTitle {
+  
+  z-index: 1;
+}
+
+/* если у topTitle где-то стоит pointer-events:none — не ставь.
+   Если хочешь гарантированно убрать перекрытие кликов центром, можно так: */
+.topTitle { pointer-events: none; }
+.topTitleSub, .historyDropdown { pointer-events: auto; }
+
+.notifyRules{
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.notifyRuleRow{
+  display: grid;
+  grid-template-columns: auto 1fr 1fr 34px; /* timebox сам задаёт ширину */
+  gap: 10px;
+  align-items: center;
+}
+
+.notifyTimeInput{
+  height: 42px;
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  color: rgba(255,255,255,0.92);
+  font-weight: 900;
+  font-size: 14px;
+  padding: 0 12px;
+  outline: none;
+}
+
+.notifyRemoveRule{
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: transparent;
+  color: rgba(255,255,255,0.9);
+  font-weight: 1000;
+  font-size: 18px;
+  display: grid;
+  place-items: center;
+  justify-self: end;
+}
+
+.notifyAddRuleBtn{
+  width: 100%;
+  margin-top: 10px;
+  border-radius: 16px;
+  padding: 14px 14px;
+  font-weight: 1000;
+  font-size: 16px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: transparent;
+  color: rgba(255,255,255,0.75);
+}
+
+/* ===== Time input HH:MM (fixed colon, numeric keyboard) ===== */
+.notifyTimeBox{
+  height: 42px;
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  gap: 6px;
+
+  width: 104px;            /* компактнее, чем было */
+  justify-content: center;
+  overflow: hidden;        /* чтобы ничего не “вылезало” */
+}
+
+.notifyTimePart{
+  width: 28px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: rgba(255,255,255,0.92);
+  font-weight: 1000;
+  font-size: 14px;
+  text-align: center;
+  padding: 0;
+}
+
+.notifyTimePart::placeholder{
+  color: rgba(255,255,255,0.35);
+  font-weight: 900;
+}
+
+.notifyTimeColon{
+  color: rgba(255,255,255,0.55);
+  font-weight: 1000;
+  line-height: 1;
+}
+
+/* ===== Time input (HH:MM with fixed ':') ===== */
+.notifyTimeField{
+  height: 42px;
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  min-width: 110px; /* компактнее, чтобы не было "слишком широкая плашка" */
+}
+
+.notifyTimePart{
+  width: 28px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: rgba(255,255,255,0.92);
+  font-weight: 1000;
+  font-size: 14px;
+  text-align: center;
+  padding: 0;
+}
+
+.notifyTimePart::placeholder{
+  color: rgba(255,255,255,0.35);
+  font-weight: 900;
+}
+
+.notifyColon{
+  color: rgba(255,255,255,0.75);
+  font-weight: 1000;
+  font-size: 14px;
+  user-select: none;
+}
+
+/* ===== Fix row layout so X never "leaks" ===== */
+.notifyRuleRow{
+  display: grid;
+  grid-template-columns: 110px 1fr 1fr 36px;
+  gap: 10px;
+  align-items: center;
+}
+
+.notifyRemoveRule{
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: transparent;
+  color: rgba(255,255,255,0.9);
+  font-weight: 1000;
+  font-size: 18px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+/* pills чуть компактнее, чтобы всё влезало */
+.pill{
+  padding: 10px 10px;
+  border-radius: 14px;
+}
+
+.timeInput {
+  width: 72px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+  padding: 0 10px;
+  font-size: 14px;
+}
+
+.notifyPills{
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: nowrap;          /* ✅ в одну строку */
+  gap: 8px;                   /* чуть плотнее */
+  overflow: hidden;           /* не даём вылезать */
+}
+
+/* ✅ компактные pill именно для дней недели */
+.notifyPills .pill{
+  padding: 8px 10px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1;
+  min-width: 0;
+}
+
+.timeInput{
+  height: 42px;
+  width: 110px;                 /* ✅ чуть шире под HH:MM */
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  color: rgba(255,255,255,0.92);
+
+  font-weight: 1000;
+  font-size: 14px;
+  text-align: center;
+
+  outline: none;
+  padding: 0 10px;
+}
+
+.timeInput::placeholder{
+  color: rgba(255,255,255,0.35);
+  font-weight: 900;
+}
+
+.timeInput:focus{
+  border-color: rgba(107,92,255,0.55);
+  box-shadow: 0 0 0 3px rgba(107,92,255,0.14);
+}
+
+.notifyRemoveRule{
+  width: 36px;
+  height: 42px;                 /* ✅ одинаково по высоте с инпутом */
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+
+  display: grid;
+  place-items: center;
+
+  color: rgba(255,255,255,0.92);
+  font-weight: 1000;
+  font-size: 18px;
+  line-height: 1;               /* ✅ центрирование символа */
+  padding: 0;
+  cursor: pointer;
+}
+
+.notifyRemoveRule:active{
+  transform: scale(0.98);
+  opacity: 0.85;
+}
+
+.notifyRuleRow{
+  display: grid;
+  grid-template-columns: 110px 1fr 1fr 36px; /* ✅ ровно под timeInput + X */
+  gap: 10px;
+  align-items: center;
+}
