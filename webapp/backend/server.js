@@ -19,6 +19,8 @@ ensureDir(UPLOAD_ROOT);
 
 const CACHE_DIR = path.join(__dirname, '.cache');
 ensureDir(CACHE_DIR);
+const FRONTEND_DIST = path.resolve(__dirname, '..', 'dist');
+const FRONTEND_INDEX = path.join(FRONTEND_DIST, 'index.html');
 
 function cachePath(key) {
   return path.join(CACHE_DIR, safeSlug(key) + '.json');
@@ -87,9 +89,19 @@ const upload = multer({
 });
 
 function requireToken() {
-  const token = process.env.BOT_TOKEN;
-  if (!token) throw new Error('BOT_TOKEN not set');
-  return token;
+  const envToken = String(process.env.BOT_TOKEN || '').trim();
+  if (envToken) return envToken;
+
+  const tokenFile = process.env.TOKEN_FILE
+    ? path.resolve(process.env.TOKEN_FILE)
+    : path.resolve(__dirname, '..', '..', 'token.txt');
+
+  try {
+    const fileToken = fs.readFileSync(tokenFile, 'utf-8').trim();
+    if (fileToken) return fileToken;
+  } catch {}
+
+  throw new Error(`Telegram token not found. Expected token file at ${tokenFile}`);
 }
 
 function normalizeInitData(input) {
@@ -129,7 +141,7 @@ function getUserIdFromInitData(initData) {
 function runPython(cmd, args = [], { timeoutMs = 12000 } = {}) {
   return new Promise((resolve, reject) => {
     const sh = path.join(__dirname, 'fa_bridge.sh');
-    const py = spawn('bash', [sh, cmd, ...args.map(String)], {
+    const py = spawn('sh', [sh, cmd, ...args.map(String)], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -350,8 +362,7 @@ app.post('/api/auth/telegram', (req, res) => {
 
     const init = normalizeInitData(initData);
 
-    requireToken();
-    validate(init, process.env.BOT_TOKEN);
+    validate(init, requireToken());
 
     return res.json({ ok: true, message: 'initData is valid' });
   } catch (e) {
@@ -748,9 +759,11 @@ app.post('/api/search', async (req, res) => {
 
     const py = await runPython(cmd, [query]);
     const items = (py.items || []).slice(0, 7);
+    console.log(`[search] type=${type === 'teacher' ? 'teacher' : 'group'} q=${JSON.stringify(query)} count=${items.length}`);
 
     return res.json({ ok: true, items });
   } catch (e) {
+    console.error('[search] failed:', String(e?.message || e));
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
@@ -2517,6 +2530,17 @@ setInterval(() => { notifyTick().catch(()=>{}); }, 20000);
 setInterval(() => { scheduleSnapshotTick().catch(()=>{}); }, 45000);
 setTimeout(() => { scheduleSnapshotTick().catch(()=>{}); }, 5000);
 
-app.listen(8000, () => {
-  console.log('Backend listening on http://localhost:8000');
+if (fs.existsSync(FRONTEND_DIST)) {
+  app.use(express.static(FRONTEND_DIST));
+
+  app.get(/^(?!\/api(?:\/|$)|\/files(?:\/|$)).*/, (req, res, next) => {
+    if (!fs.existsSync(FRONTEND_INDEX)) return next();
+    res.sendFile(FRONTEND_INDEX);
+  });
+}
+
+const PORT = Number(process.env.PORT || 8000);
+
+app.listen(PORT, () => {
+  console.log(`Backend listening on http://localhost:${PORT}`);
 });

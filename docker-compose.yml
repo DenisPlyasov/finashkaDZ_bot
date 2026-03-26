@@ -1,0 +1,26 @@
+services:
+  findz:
+    build:
+      context: .
+    container_name: findz
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      PORT: 8000
+      REQUIRED_CHANNEL: ${REQUIRED_CHANNEL:-}
+      REQUIRED_CHANNEL_LINK: ${REQUIRED_CHANNEL_LINK:-}
+      REQUIRED_CHANNEL_ID: ${REQUIRED_CHANNEL_ID:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      NOTIFY_TZ: ${NOTIFY_TZ:-Europe/Moscow}
+      ENABLE_BOT: ${ENABLE_BOT:-1}
+      ENABLE_WEBAPP: ${ENABLE_WEBAPP:-1}
+      FA_PY: /usr/bin/python3
+      FA_TIMEOUT_SEC: ${FA_TIMEOUT_SEC:-8}
+      GOOGLE_CREDS_JSON_B64: ${GOOGLE_CREDS_JSON_B64:-}
+    volumes:
+      - findz_data:/app/data
+      - ./token.txt:/app/token.txt:ro
+    restart: unless-stopped
+
+volumes:
+  findz_data:
