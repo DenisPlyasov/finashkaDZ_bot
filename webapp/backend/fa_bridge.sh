@@ -29,7 +29,7 @@ else
         PY="$candidate"
         break 2
       fi
-    fi
+    done
   done
 
   if [ -z "$PY" ]; then
