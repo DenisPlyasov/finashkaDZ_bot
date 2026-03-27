@@ -474,21 +474,21 @@ def main():
                 print(json.dumps({"ok": False, "error": "Usage: timetable_* <id> [start] [end]"}))
                 return
 
-            entity_id = int(sys.argv[2])
-
             start = _norm_date(sys.argv[3]) if len(sys.argv) >= 4 else _norm_date("")
             end = _norm_date(sys.argv[4]) if len(sys.argv) >= 5 else start
             if len(sys.argv) < 5:
                 print(json.dumps({"ok": False, "error": "Usage: timetable_* <id> <start> <end>"}))
                 return
 
-            entity_id = int(sys.argv[2])
+            entity_id_raw = sys.argv[2]
             start = sys.argv[3]
             end = sys.argv[4]
 
             if cmd == "timetable_group":
+                entity_id = int(entity_id_raw)
                 raw = _call_with_timeout(fa.timetable_group, entity_id, start, end)
             else:
+                entity_id = str(entity_id_raw).strip()
                 raw = _call_with_timeout(fa.timetable_teacher, entity_id, start, end)
 
             # raw может быть dict по датам или list

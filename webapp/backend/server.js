@@ -138,6 +138,21 @@ function getUserIdFromInitData(initData) {
   return user.id;
 }
 
+function normalizeTargetId(targetType, rawId) {
+  const type = String(targetType || '').trim();
+  if (type === 'teacher') {
+    const v = String(rawId ?? '').trim();
+    if (!v) throw new Error('teacher id required');
+    return v;
+  }
+
+  const n = Number(rawId);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    throw new Error('numeric target id required');
+  }
+  return n;
+}
+
 function runPython(cmd, args = [], { timeoutMs = 12000 } = {}) {
   return new Promise((resolve, reject) => {
     const sh = path.join(__dirname, 'fa_bridge.sh');
@@ -777,6 +792,7 @@ app.post('/api/selection/set', (req, res) => {
 
     const userId = getUserIdFromInitData(initData);
     const now = Date.now();
+    const normalizedTargetId = normalizeTargetId(type, id);
 
     const stmt = db.prepare(`
       INSERT INTO user_selection (telegram_user_id, target_type, target_id, target_title, updated_at)
@@ -788,18 +804,18 @@ app.post('/api/selection/set', (req, res) => {
         updated_at=excluded.updated_at
     `);
 
-    stmt.run(userId, type, Number(id), String(title), now);
+    stmt.run(userId, type, normalizedTargetId, String(title), now);
 
     // обновляем историю: убираем дубль и добавляем как “последний”
     db.prepare(`
     DELETE FROM user_selection_history
     WHERE telegram_user_id = ? AND target_type = ? AND target_id = ?
-    `).run(userId, type, Number(id));
+    `).run(userId, type, normalizedTargetId);
 
     db.prepare(`
     INSERT INTO user_selection_history (telegram_user_id, target_type, target_id, target_title, used_at)
     VALUES (?, ?, ?, ?, ?)
-    `).run(userId, type, Number(id), String(title), now);
+    `).run(userId, type, normalizedTargetId, String(title), now);
 
     // ограничиваем историю до 5 записей
     db.prepare(`
@@ -815,7 +831,7 @@ app.post('/api/selection/set', (req, res) => {
 
     warmupScheduleWindowForTarget({
       targetType: String(type),
-      targetId: Number(id),
+      targetId: normalizedTargetId,
       targetTitle: String(title),
     });
 
@@ -1312,13 +1328,13 @@ const upsertScheduleSnapshotTouchStmt = db.prepare(`
 `);
 
 function getScheduleSnapshotRow({ targetType, targetId, scheduleDate }) {
-  return selectScheduleSnapshotStmt.get(targetType, Number(targetId), scheduleDate) || null;
+  return selectScheduleSnapshotStmt.get(targetType, normalizeTargetId(targetType, targetId), scheduleDate) || null;
 }
 
 function touchScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDate, requestedAt = null }) {
   upsertScheduleSnapshotTouchStmt.run(
     targetType,
-    Number(targetId),
+    normalizeTargetId(targetType, targetId),
     String(targetTitle || ''),
     scheduleDate,
     requestedAt != null ? Number(requestedAt) : null
@@ -1335,7 +1351,7 @@ function markScheduleSnapshotError({ targetType, targetId, scheduleDate, errorTe
     Date.now(),
     String(errorText || '').slice(0, 400),
     targetType,
-    Number(targetId),
+    normalizeTargetId(targetType, targetId),
     scheduleDate
   );
 }
@@ -1361,7 +1377,7 @@ function confirmScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDa
     confirmedAt,
     confirmedAt,
     targetType,
-    Number(targetId),
+    normalizeTargetId(targetType, targetId),
     scheduleDate
   );
 }
@@ -1395,7 +1411,7 @@ function setScheduleSnapshotCandidate({
     candidateFirstSeenAt,
     Number(candidateSeenCount || 0),
     targetType,
-    Number(targetId),
+    normalizeTargetId(targetType, targetId),
     scheduleDate
   );
 }
@@ -1532,7 +1548,7 @@ async function refreshScheduleSnapshot({ targetType, targetId, targetTitle, sche
 
   const promise = (async () => {
     const cmd = targetType === 'teacher' ? 'timetable_teacher' : 'timetable_group';
-    const py = await runPython(cmd, [Number(targetId), scheduleDate, scheduleDate], { timeoutMs: 12000 });
+    const py = await runPython(cmd, [normalizeTargetId(targetType, targetId), scheduleDate, scheduleDate], { timeoutMs: 12000 });
 
     return applyFreshScheduleSnapshot({
       targetType,
