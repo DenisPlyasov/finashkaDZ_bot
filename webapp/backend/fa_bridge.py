@@ -104,6 +104,27 @@ def _join_fio(last: str, first: str, middle: str) -> str:
     parts = [p.strip() for p in (last, first, middle) if isinstance(p, str) and p.strip()]
     return " ".join(parts)
 
+def _search_item_id(d: Dict[str, Any]) -> Any:
+    for key in ("id", "group_id", "teacher_id", "lecturer_id", "value"):
+        v = d.get(key)
+        if v not in (None, ""):
+            return v
+    return None
+
+def _search_item_title(d: Dict[str, Any]) -> str:
+    return _first_str(
+        d.get("label"),
+        d.get("name"),
+        d.get("title"),
+        d.get("full_name"),
+        d.get("lecturer_title"),
+        d.get("fio"),
+        d.get("display_name"),
+        d.get("group"),
+        d.get("group_title"),
+        _join_fio(d.get("surname") or "", d.get("name") or "", d.get("patronymic") or ""),
+    )
+
 # ---------- парсинг времени (устойчивый) ----------
 _TIME_HHMM_RE = re.compile(r"(\d{1,2})[:.](\d{2})")
 _TIME_4DIGIT_RE = re.compile(r"\b(\d{1,2})(\d{2})\b")  # 1150 -> 11:50
@@ -436,9 +457,13 @@ def main():
             out = []
             for it in items:
                 d = _ensure_dict(it)
+                item_id = _search_item_id(d)
+                item_title = _search_item_title(d)
+                if item_id in (None, "") or not item_title:
+                    continue
                 out.append({
-                    "id": d.get("id"),
-                    "title": d.get("label") or d.get("name") or d.get("title") or ""
+                    "id": item_id,
+                    "title": item_title,
                 })
 
             print(json.dumps({"ok": True, "items": out}, ensure_ascii=False))
