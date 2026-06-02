@@ -328,9 +328,28 @@ def _get_teacher_full(lesson: dict) -> str:
 def _normalize_ltype(s: str) -> str:
     if not isinstance(s, str):
         return ""
-    x = s.strip().lower()
+    raw = s.strip()
+    x = raw.lower().replace("ё", "е")
     if not x:
         return ""
+
+    is_consultation = "консульта" in x
+    is_credit = "зачет" in x
+    is_exam = "экзамен" in x
+
+    # В fa_api консультации к экзаменам/зачётам часто приходят в kindOfWork
+    # строками, где одновременно есть "Консультация" и "Экзамен"/"Зачет".
+    # Поэтому консультации нужно проверять до обычных экзаменов и зачётов.
+    if is_consultation and is_credit:
+        return "консультация к зачёту"
+    if is_consultation and is_exam:
+        return "консультация к экзамену"
+    if is_credit:
+        return "зачёт"
+    if is_exam:
+        return "экзамен"
+    if is_consultation:
+        return "консультация"
     if "лекци" in x:
         return "лекция"
     if "семинар" in x or "семинарск" in x:
@@ -339,11 +358,7 @@ def _normalize_ltype(s: str) -> str:
         return "практика"
     if "лаб" in x:
         return "лабораторная"
-    if "зачет" in x or "зачёт" in x:
-        return "зачёт"
-    if "экзамен" in x:
-        return "экзамен"
-    return s.strip()
+    return raw
 
 def _extract_title(lesson: dict) -> str:
     return _first_str(
