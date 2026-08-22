@@ -1592,7 +1592,7 @@ function buildTimetableResponseFromSnapshot({ snapshotRow, sel, date, userId, wa
 
 const scheduleSnapshotRefreshInFlight = new Map();
 
-function moveUserGroupSelectionId({ userId, oldGroupId, newGroupId, groupTitle }) {
+function migrateGroupIdForTitle({ oldGroupId, newGroupId, groupTitle, reason = '' }) {
   const oldId = cleanTargetId(oldGroupId);
   const newId = cleanTargetId(newGroupId);
   const title = String(groupTitle || '').trim() || 'Группа';
@@ -1604,18 +1604,55 @@ function moveUserGroupSelectionId({ userId, oldGroupId, newGroupId, groupTitle }
     db.prepare(`
       UPDATE user_selection
       SET target_id = ?, target_title = ?, updated_at = ?
-      WHERE telegram_user_id = ? AND target_type = 'group' AND target_id = ?
-    `).run(newId, title, now, userId, oldId);
+      WHERE target_type = 'group' AND target_id = ? AND target_title = ?
+    `).run(newId, title, now, oldId, title);
 
     db.prepare(`
-      DELETE FROM user_selection_history
-      WHERE telegram_user_id = ? AND target_type = 'group' AND target_id = ?
-    `).run(userId, newId);
+      UPDATE user_selection_history
+      SET target_id = ?, target_title = ?, used_at = ?
+      WHERE target_type = 'group' AND target_id = ? AND target_title = ?
+    `).run(newId, title, now, oldId, title);
 
     db.prepare(`
-      INSERT INTO user_selection_history (telegram_user_id, target_type, target_id, target_title, used_at)
-      VALUES (?, 'group', ?, ?, ?)
-    `).run(userId, newId, title, now);
+      UPDATE homework
+      SET target_id = ?, target_title = ?
+      WHERE target_type = 'group' AND target_id = ? AND target_title = ?
+    `).run(newId, title, oldId, title);
+
+    db.prepare(`
+      UPDATE homework_drafts
+      SET target_id = ?, target_title = ?
+      WHERE target_type = 'group' AND target_id = ? AND target_title = ?
+    `).run(newId, title, oldId, title);
+
+    db.prepare(`
+      UPDATE schedule_snapshots
+      SET target_id = ?, target_title = ?
+      WHERE target_type = 'group'
+        AND target_id = ?
+        AND target_title = ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM schedule_snapshots s2
+          WHERE s2.target_type = 'group'
+            AND s2.target_id = ?
+            AND s2.schedule_date = schedule_snapshots.schedule_date
+        )
+    `).run(newId, title, oldId, title, newId);
+
+    db.prepare(`
+      DELETE FROM schedule_snapshots
+      WHERE target_type = 'group'
+        AND target_id = ?
+        AND target_title = ?
+        AND EXISTS (
+          SELECT 1
+          FROM schedule_snapshots s2
+          WHERE s2.target_type = 'group'
+            AND s2.target_id = ?
+            AND s2.schedule_date = schedule_snapshots.schedule_date
+        )
+    `).run(oldId, title, newId);
 
     const oldNumeric = Number(oldId);
     const newNumeric = Number(newId);
@@ -1624,35 +1661,42 @@ function moveUserGroupSelectionId({ userId, oldGroupId, newGroupId, groupTitle }
         INSERT OR IGNORE INTO favorites (telegram_user_id, group_id, group_title, created_at)
         SELECT telegram_user_id, ?, ?, created_at
         FROM favorites
-        WHERE telegram_user_id = ? AND group_id = ?
-      `).run(newNumeric, title, userId, oldNumeric);
+        WHERE group_id = ? AND group_title = ?
+      `).run(newNumeric, title, oldNumeric, title);
 
       db.prepare(`
         DELETE FROM favorites
-        WHERE telegram_user_id = ? AND group_id = ?
-      `).run(userId, oldNumeric);
+        WHERE group_id = ? AND group_title = ?
+      `).run(oldNumeric, title);
 
-      const hasNewNotify = db.prepare(`
-        SELECT 1 FROM notify_settings
-        WHERE telegram_user_id = ? AND group_id = ?
-      `).get(userId, newNumeric);
+      db.prepare(`
+        UPDATE notify_settings
+        SET group_id = ?, group_title = ?, updated_at = ?
+        WHERE group_id = ?
+          AND group_title = ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM notify_settings ns2
+            WHERE ns2.telegram_user_id = notify_settings.telegram_user_id
+              AND ns2.group_id = ?
+          )
+      `).run(newNumeric, title, now, oldNumeric, title, newNumeric);
 
-      if (!hasNewNotify) {
-        db.prepare(`
-          UPDATE notify_settings
-          SET group_id = ?, group_title = ?, updated_at = ?
-          WHERE telegram_user_id = ? AND group_id = ?
-        `).run(newNumeric, title, now, userId, oldNumeric);
-      } else {
-        db.prepare(`
-          DELETE FROM notify_settings
-          WHERE telegram_user_id = ? AND group_id = ?
-        `).run(userId, oldNumeric);
-      }
+      db.prepare(`
+        DELETE FROM notify_settings
+        WHERE group_id = ?
+          AND group_title = ?
+          AND EXISTS (
+            SELECT 1
+            FROM notify_settings ns2
+            WHERE ns2.telegram_user_id = notify_settings.telegram_user_id
+              AND ns2.group_id = ?
+          )
+      `).run(oldNumeric, title, newNumeric);
     }
   })();
 
-  console.log(`[selection] refreshed group id for user ${userId}: ${oldId} -> ${newId} (${title})`);
+  console.log(`[selection] migrated group id globally: ${oldId} -> ${newId} (${title})${reason ? `, ${reason}` : ''}`);
 }
 
 async function findReplacementGroupSchedule({ sel, scheduleDate }) {
@@ -1680,6 +1724,49 @@ async function findReplacementGroupSchedule({ sel, scheduleDate }) {
         targetType: 'group',
         targetId: candidateId,
         targetTitle: candidateTitle || sel.target_title,
+        items,
+      };
+    } catch {
+      // Пробуем следующий найденный id.
+    }
+  }
+
+  return null;
+}
+
+function firstScheduleDateFromItems(items, fallbackDate = null) {
+  const dates = uniqNonEmpty((Array.isArray(items) ? items : []).map((item) => item?.date))
+    .sort((a, b) => a.localeCompare(b));
+  return dates[0] || fallbackDate;
+}
+
+async function findReplacementGroupScheduleWindow({ sel, startDate, endDate }) {
+  if (!sel || sel.target_type !== 'group') return null;
+
+  const oldId = cleanTargetId(sel.target_id);
+  const wantedTitle = normalizeLookupTitle(sel.target_title);
+  if (!wantedTitle) return null;
+
+  const search = await runPython('search_group', [sel.target_title], { timeoutMs: 12000 });
+  const candidates = Array.isArray(search.items) ? search.items : [];
+
+  for (const candidate of candidates.slice(0, 10)) {
+    const candidateId = cleanTargetId(candidate?.id);
+    const candidateTitle = String(candidate?.title || '').trim();
+    if (!candidateId || candidateId === oldId) continue;
+    if (normalizeLookupTitle(candidateTitle) !== wantedTitle) continue;
+
+    try {
+      const py = await runPython('timetable_group', [candidateId, startDate, endDate], { timeoutMs: 16000 });
+      const items = Array.isArray(py.items) ? py.items : [];
+      const firstDate = firstScheduleDateFromItems(items);
+      if (!firstDate) continue;
+
+      return {
+        targetType: 'group',
+        targetId: candidateId,
+        targetTitle: candidateTitle || sel.target_title,
+        firstDate,
         items,
       };
     } catch {
@@ -2065,6 +2152,79 @@ app.post('/api/hw/file/remove', (req, res) => {
   }
 });
 
+app.post('/api/timetable/nearest', async (req, res) => {
+  const { initData, start_date, days } = req.body || {};
+  if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
+
+  let userId, sel;
+  try {
+    userId = getUserIdFromInitData(initData);
+    sel = getSelectionForUser(userId);
+    if (!sel) return res.status(404).json({ ok: false, error: 'No selection' });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: String(e?.message || e) });
+  }
+
+  const startDate = String(start_date || ymdDotToday(0));
+  const lookaheadDays = Math.max(1, Math.min(60, Number(days || 30)));
+  const endDate = addDaysStr(startDate, lookaheadDays);
+  const cmd = sel.target_type === 'teacher' ? 'timetable_teacher' : 'timetable_group';
+
+  try {
+    let py = await runPython(cmd, [cleanTargetId(sel.target_id), startDate, endDate], { timeoutMs: 16000 });
+    let items = Array.isArray(py.items) ? py.items : [];
+    let firstDate = firstScheduleDateFromItems(items);
+
+    if (!firstDate && sel.target_type === 'group') {
+      const replacement = await findReplacementGroupScheduleWindow({
+        sel,
+        startDate,
+        endDate,
+      });
+
+      if (replacement) {
+        migrateGroupIdForTitle({
+          oldGroupId: sel.target_id,
+          newGroupId: replacement.targetId,
+          groupTitle: replacement.targetTitle,
+          reason: `nearest search triggered by user ${userId}`,
+        });
+
+        sel = {
+          ...sel,
+          target_id: replacement.targetId,
+          target_title: replacement.targetTitle,
+        };
+        items = replacement.items;
+        firstDate = replacement.firstDate;
+      }
+    }
+
+    if (!firstDate) {
+      return res.json({ ok: true, found: false, date: null });
+    }
+
+    const firstDateItems = items.filter((item) => String(item?.date || '') === firstDate);
+    applyFreshScheduleSnapshot({
+      targetType: sel.target_type,
+      targetId: sel.target_id,
+      targetTitle: sel.target_title,
+      scheduleDate: firstDate,
+      freshItems: firstDateItems,
+    });
+
+    return res.json({
+      ok: true,
+      found: true,
+      date: firstDate,
+      count: firstDateItems.length,
+    });
+  } catch (e) {
+    const msg = String(e?.message || e);
+    return res.status(500).json({ ok: false, error: /FA_TIMEOUT/.test(msg) ? 'FA_TIMEOUT' : msg.slice(0, 300) });
+  }
+});
+
 app.post('/api/timetable/day', async (req, res) => {
   const { initData, date } = req.body || {};
   if (!initData) return res.status(400).json({ ok: false, error: 'initData missing' });
@@ -2112,11 +2272,11 @@ app.post('/api/timetable/day', async (req, res) => {
       });
 
       if (replacement) {
-        moveUserGroupSelectionId({
-          userId,
+        migrateGroupIdForTitle({
           oldGroupId: sel.target_id,
           newGroupId: replacement.targetId,
           groupTitle: replacement.targetTitle,
+          reason: `triggered by user ${userId}`,
         });
 
         sel = {

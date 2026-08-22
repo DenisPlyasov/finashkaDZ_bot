@@ -85,6 +85,14 @@ function formatFaDate(d) {
   return `${y}.${m}.${day}`;
 }
 
+function parseFaDate(s) {
+  const m = String(s || "").match(/^(\d{4})\.(\d{2})\.(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
 
 
 function formatRuLine(d) {
@@ -565,6 +573,7 @@ export default function App() {
         setPairsEmptyText("На текущую дату пар не найдено");
         setScheduleActualAt(res?.actualAt || null);
         setScheduleActualWarning(String(res?.warning || ""));
+        return { ok: true, items, response: res };
       } else {
         setPairs([]);
         setHasPairs(false);
@@ -574,6 +583,7 @@ export default function App() {
         );
         setScheduleActualAt(null);
         setScheduleActualWarning("");
+        return { ok: false, items: [], response: res };
       }
     } catch {
       setPairs([]);
@@ -581,8 +591,32 @@ export default function App() {
       setPairsEmptyText("Время ожидания ответа от API превышено");
       setScheduleActualAt(null);
       setScheduleActualWarning("");
+      return { ok: false, items: [], response: null };
     } finally {
       setPairsLoading(false);
+    }
+  };
+
+  const loadInitialPairsForDate = async (d, data = initData) => {
+    const first = await fetchPairsForDate(d, data);
+    if (first?.items?.length > 0) return;
+
+    try {
+      const r = await fetch("/api/timetable/nearest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: data, start_date: formatFaDate(d), days: 45 }),
+      });
+      const res = await r.json();
+      const nextDate = r.ok && res?.ok && res?.found ? parseFaDate(res.date) : null;
+      if (!nextDate || sameDay(nextDate, d)) return;
+
+      setSelectedDate(nextDate);
+      setWeekStart(startOfWeekMonday(nextDate));
+      setCalendarBaseMonth(startOfMonth(nextDate));
+      await fetchPairsForDate(nextDate, data);
+    } catch {
+      // Оставляем выбранной сегодняшнюю дату и уже показанный пустой результат.
     }
   };
 
@@ -678,7 +712,7 @@ export default function App() {
         setHistoryOpen(false);
 
         await loadHistory(data);
-        await fetchPairsForDate(t, data);
+        await loadInitialPairsForDate(t, data);
 
         try {
           const fr = await fetch("/api/favorites/is", {
@@ -1181,7 +1215,7 @@ const removeHomeworkFile = async (fileId) => {
       setHistoryOpen(false);
 
       await loadHistory(initData);
-      await fetchPairsForDate(t, initData);
+      await loadInitialPairsForDate(t, initData);
 
       setStatus("ok");
       setStep("schedule");
@@ -1277,7 +1311,7 @@ const removeHomeworkFile = async (fileId) => {
       t.setHours(0, 0, 0, 0);
       setSelectedDate(t);
       setWeekStart(startOfWeekMonday(t));
-      await fetchPairsForDate(t, initData);
+      await loadInitialPairsForDate(t, initData);
       await refreshFavoriteState();
     } catch {
       // ignore
