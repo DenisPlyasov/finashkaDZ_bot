@@ -174,6 +174,29 @@ function shortenGroupedTeacherName(raw) {
   return initials ? `${parts[0]} ${initials}` : full;
 }
 
+function formatTeacherDisplayName(raw) {
+  const full = safeText(raw);
+  if (!full) return "";
+
+  return full
+    .split(";")
+    .map((name) => {
+      const value = safeText(name);
+      if (!value) return "";
+
+      const parts = value.split(/\s+/).filter(Boolean);
+      if (parts.length < 3) return value;
+
+      const restLooksShort = parts.slice(1).every((part) => /^[A-ZА-ЯЁ]\.?$/i.test(part));
+      if (restLooksShort) return value;
+
+      const short = shortenGroupedTeacherName(value);
+      return short && short !== value ? `${short} (${value})` : value;
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
 function renderPairNo(n) {
   if (!n) return "";
   return `${n} ПАРА`;
@@ -1399,7 +1422,9 @@ const removeHomeworkFile = async (fileId) => {
               className="topTitleSub"
               onClick={() => setHistoryOpen((v) => !v)}
             >
-              {selection?.target_title || ""}
+              {selection?.target_type === "teacher"
+                ? formatTeacherDisplayName(selection?.target_title)
+                : (selection?.target_title || "")}
             </button>
 
             {historyOpen && (
@@ -1413,7 +1438,9 @@ const removeHomeworkFile = async (fileId) => {
                       className="historyItem"
                       onClick={() => switchToFromHistory(h)}
                     >
-                      {h.target_title}
+                      {h.target_type === "teacher"
+                        ? formatTeacherDisplayName(h.target_title)
+                        : h.target_title}
                       <span className="historyTag">
                         {h.target_type === "teacher" ? "препод" : "группа"}
                       </span>
@@ -1558,7 +1585,7 @@ const removeHomeworkFile = async (fileId) => {
                 const showVariantList = pairVariants.length > 1;
                 const pairLink = normalizeExternalUrl(p.link);
                 const pairRoom = safeText(p.room);
-                const pairTeacher = safeText(p.teacher);
+                const pairTeacher = formatTeacherDisplayName(p.teacher);
 
                 return (
                   <div className="pairBlock" key={`${p.time}-${idx}`}>
@@ -1590,7 +1617,7 @@ const removeHomeworkFile = async (fileId) => {
                               key={`${variant.teacher || "teacher"}-${variant.room || "room"}-${variant.link || "link"}-${variantIdx}`}
                             >
                               <span className="pairVariantTeacher">
-                                {shortenGroupedTeacherName(variant.teacher) || "Преподаватель не указан"}
+                                {formatTeacherDisplayName(variant.teacher) || "Преподаватель не указан"}
                               </span>
                               {(safeText(variant.room) || normalizeExternalUrl(variant.link)) ? (
                                 <span className="pairVariantSeparator">•</span>

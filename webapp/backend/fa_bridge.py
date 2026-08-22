@@ -464,7 +464,7 @@ def main():
                 print(json.dumps({"ok": False, "error": "Usage: timetable_* <id> [start] [end]"}))
                 return
 
-            entity_id = int(sys.argv[2])
+            entity_id = str(sys.argv[2]).strip()
 
             start = _norm_date(sys.argv[3]) if len(sys.argv) >= 4 else _norm_date("")
             end = _norm_date(sys.argv[4]) if len(sys.argv) >= 5 else start
@@ -472,7 +472,7 @@ def main():
                 print(json.dumps({"ok": False, "error": "Usage: timetable_* <id> <start> <end>"}))
                 return
 
-            entity_id = int(sys.argv[2])
+            entity_id = str(sys.argv[2]).strip()
             start = sys.argv[3]
             end = sys.argv[4]
 

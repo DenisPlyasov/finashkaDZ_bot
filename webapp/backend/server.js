@@ -179,7 +179,7 @@ db.exec(`
 CREATE TABLE IF NOT EXISTS user_selection (
   telegram_user_id INTEGER PRIMARY KEY,
   target_type TEXT NOT NULL,           -- 'group' | 'teacher'
-  target_id INTEGER NOT NULL,
+  target_id TEXT NOT NULL,
   target_title TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS user_selection_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_user_id INTEGER NOT NULL,
   target_type TEXT NOT NULL,
-  target_id INTEGER NOT NULL,
+  target_id TEXT NOT NULL,
   target_title TEXT NOT NULL,
   used_at INTEGER NOT NULL
 );
@@ -238,7 +238,7 @@ CREATE INDEX IF NOT EXISTS idx_user_selection_history_user_time
 db.exec(`
 CREATE TABLE IF NOT EXISTS schedule_snapshots (
   target_type TEXT NOT NULL,
-  target_id INTEGER NOT NULL,
+  target_id TEXT NOT NULL,
   target_title TEXT NOT NULL DEFAULT '',
   schedule_date TEXT NOT NULL,
 
@@ -269,7 +269,7 @@ db.exec(`
 CREATE TABLE IF NOT EXISTS homework (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   target_type TEXT NOT NULL,          -- 'group' | 'teacher'
-  target_id INTEGER NOT NULL,
+  target_id TEXT NOT NULL,
   target_title TEXT NOT NULL,
 
   pair_date TEXT NOT NULL,            -- 'YYYY.MM.DD'
@@ -295,7 +295,7 @@ CREATE TABLE IF NOT EXISTS homework_drafts (
   telegram_user_id INTEGER NOT NULL,
 
   target_type TEXT NOT NULL,
-  target_id INTEGER NOT NULL,
+  target_id TEXT NOT NULL,
   target_title TEXT NOT NULL,
 
   pair_date TEXT NOT NULL,
@@ -775,18 +775,19 @@ app.post('/api/selection/set', (req, res) => {
         updated_at=excluded.updated_at
     `);
 
-    stmt.run(userId, type, Number(id), String(title), now);
+    const targetId = String(id).trim();
+    stmt.run(userId, type, targetId, String(title), now);
 
     // обновляем историю: убираем дубль и добавляем как “последний”
     db.prepare(`
     DELETE FROM user_selection_history
     WHERE telegram_user_id = ? AND target_type = ? AND target_id = ?
-    `).run(userId, type, Number(id));
+    `).run(userId, type, targetId);
 
     db.prepare(`
     INSERT INTO user_selection_history (telegram_user_id, target_type, target_id, target_title, used_at)
     VALUES (?, ?, ?, ?, ?)
-    `).run(userId, type, Number(id), String(title), now);
+    `).run(userId, type, targetId, String(title), now);
 
     // ограничиваем историю до 5 записей
     db.prepare(`
@@ -802,7 +803,7 @@ app.post('/api/selection/set', (req, res) => {
 
     warmupScheduleWindowForTarget({
       targetType: String(type),
-      targetId: Number(id),
+      targetId,
       targetTitle: String(title),
     });
 
@@ -944,7 +945,7 @@ app.post('/api/hw/file/add', upload.single('file'), (req, res) => {
 
     if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
 
-    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+    if (hw.target_type !== sel.target_type || !sameTargetId(hw.target_id, sel.target_id)) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
 
@@ -1102,6 +1103,14 @@ function buildDownloadName(fileItem) {
 
 function cleanPairText(value) {
   return String(value ?? '').trim();
+}
+
+function cleanTargetId(value) {
+  return String(value ?? '').trim();
+}
+
+function sameTargetId(a, b) {
+  return cleanTargetId(a) === cleanTargetId(b);
 }
 
 function uniqNonEmpty(values) {
@@ -1278,6 +1287,56 @@ function stableScheduleJson(items) {
   return JSON.stringify(Array.isArray(items) ? items : []);
 }
 
+function scheduleJsonHasItems(raw) {
+  return safeParseScheduleJson(raw).length > 0;
+}
+
+function promoteNonEmptyScheduleCandidatesAfterEmpty() {
+  const rows = db.prepare(`
+    SELECT target_type, target_id, schedule_date, data_json, candidate_json,
+           candidate_first_seen_at, last_checked_at, last_success_at
+    FROM schedule_snapshots
+    WHERE candidate_json IS NOT NULL
+      AND candidate_json != ''
+  `).all();
+
+  const promoteStmt = db.prepare(`
+    UPDATE schedule_snapshots
+    SET data_json = ?,
+        actual_at = ?,
+        last_success_at = ?,
+        candidate_json = NULL,
+        candidate_first_seen_at = NULL,
+        candidate_seen_count = 0
+    WHERE target_type = ? AND target_id = ? AND schedule_date = ?
+  `);
+
+  let promoted = 0;
+  const now = Date.now();
+
+  for (const row of rows) {
+    if (scheduleJsonHasItems(row.data_json)) continue;
+    if (!scheduleJsonHasItems(row.candidate_json)) continue;
+
+    const actualAt = Number(row.candidate_first_seen_at || row.last_success_at || row.last_checked_at || now);
+    promoteStmt.run(
+      row.candidate_json,
+      actualAt,
+      Number(row.last_success_at || actualAt),
+      row.target_type,
+      cleanTargetId(row.target_id),
+      row.schedule_date
+    );
+    promoted += 1;
+  }
+
+  if (promoted > 0) {
+    console.log(`[schedule_snapshots] promoted ${promoted} non-empty candidate(s) after empty snapshots`);
+  }
+}
+
+promoteNonEmptyScheduleCandidatesAfterEmpty();
+
 const selectScheduleSnapshotStmt = db.prepare(`
   SELECT *
   FROM schedule_snapshots
@@ -1299,13 +1358,13 @@ const upsertScheduleSnapshotTouchStmt = db.prepare(`
 `);
 
 function getScheduleSnapshotRow({ targetType, targetId, scheduleDate }) {
-  return selectScheduleSnapshotStmt.get(targetType, Number(targetId), scheduleDate) || null;
+  return selectScheduleSnapshotStmt.get(targetType, cleanTargetId(targetId), scheduleDate) || null;
 }
 
 function touchScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDate, requestedAt = null }) {
   upsertScheduleSnapshotTouchStmt.run(
     targetType,
-    Number(targetId),
+    cleanTargetId(targetId),
     String(targetTitle || ''),
     scheduleDate,
     requestedAt != null ? Number(requestedAt) : null
@@ -1322,7 +1381,7 @@ function markScheduleSnapshotError({ targetType, targetId, scheduleDate, errorTe
     Date.now(),
     String(errorText || '').slice(0, 400),
     targetType,
-    Number(targetId),
+    cleanTargetId(targetId),
     scheduleDate
   );
 }
@@ -1348,7 +1407,7 @@ function confirmScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDa
     confirmedAt,
     confirmedAt,
     targetType,
-    Number(targetId),
+    cleanTargetId(targetId),
     scheduleDate
   );
 }
@@ -1382,7 +1441,7 @@ function setScheduleSnapshotCandidate({
     candidateFirstSeenAt,
     Number(candidateSeenCount || 0),
     targetType,
-    Number(targetId),
+    cleanTargetId(targetId),
     scheduleDate
   );
 }
@@ -1401,6 +1460,8 @@ function applyFreshScheduleSnapshot({
   const freshJson = stableScheduleJson(freshItems);
   const currentJson = row?.data_json || '[]';
   const hasConfirmedSnapshot = Number(row?.actual_at || 0) > 0 || Number(row?.last_success_at || 0) > 0;
+  const currentHasItems = scheduleJsonHasItems(currentJson);
+  const freshHasItems = Array.isArray(freshItems) && freshItems.length > 0;
 
   if (!hasConfirmedSnapshot) {
     confirmScheduleSnapshot({
@@ -1413,6 +1474,21 @@ function applyFreshScheduleSnapshot({
     });
     return {
       state: 'initial',
+      snapshotRow: getScheduleSnapshotRow({ targetType, targetId, scheduleDate }),
+    };
+  }
+
+  if (!currentHasItems && freshHasItems) {
+    confirmScheduleSnapshot({
+      targetType,
+      targetId,
+      targetTitle,
+      scheduleDate,
+      itemsJson: freshJson,
+      confirmedAt: now,
+    });
+    return {
+      state: 'published_after_empty',
       snapshotRow: getScheduleSnapshotRow({ targetType, targetId, scheduleDate }),
     };
   }
@@ -1519,7 +1595,7 @@ async function refreshScheduleSnapshot({ targetType, targetId, targetTitle, sche
 
   const promise = (async () => {
     const cmd = targetType === 'teacher' ? 'timetable_teacher' : 'timetable_group';
-    const py = await runPython(cmd, [Number(targetId), scheduleDate, scheduleDate], { timeoutMs: 12000 });
+    const py = await runPython(cmd, [cleanTargetId(targetId), scheduleDate, scheduleDate], { timeoutMs: 12000 });
 
     return applyFreshScheduleSnapshot({
       targetType,
@@ -1558,7 +1634,7 @@ function collectTrackedScheduleTargets(limit = 60) {
 
   const push = (targetType, targetId, targetTitle) => {
     const type = String(targetType || '').trim();
-    const id = Number(targetId || 0);
+    const id = cleanTargetId(targetId);
     if (!type || !id) return;
 
     const key = `${type}:${id}`;
@@ -1655,7 +1731,7 @@ function pickRecentSnapshotRefreshTasks(limit = 6) {
 
     tasks.push({
       targetType: row.target_type,
-      targetId: Number(row.target_id),
+      targetId: cleanTargetId(row.target_id),
       targetTitle: row.target_title,
       scheduleDate: String(row.schedule_date),
     });
@@ -1743,7 +1819,7 @@ app.post('/api/hw/file/send_to_chat', async (req, res) => {
 
     if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
 
-    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+    if (hw.target_type !== sel.target_type || !sameTargetId(hw.target_id, sel.target_id)) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
 
@@ -1857,7 +1933,7 @@ app.post('/api/hw/file/remove', (req, res) => {
 
     if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
 
-    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+    if (hw.target_type !== sel.target_type || !sameTargetId(hw.target_id, sel.target_id)) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
 
@@ -2257,7 +2333,7 @@ app.post('/api/hw/update', (req, res) => {
     if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
 
     // редактировать можно только в рамках текущего выбора (группа/препод)
-    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+    if (hw.target_type !== sel.target_type || !sameTargetId(hw.target_id, sel.target_id)) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
 
@@ -2299,7 +2375,7 @@ app.post('/api/hw/delete', (req, res) => {
 
     if (!hw) return res.status(404).json({ ok: false, error: 'Homework not found' });
 
-    if (hw.target_type !== sel.target_type || Number(hw.target_id) !== Number(sel.target_id)) {
+    if (hw.target_type !== sel.target_type || !sameTargetId(hw.target_id, sel.target_id)) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
 
