@@ -1274,6 +1274,13 @@ function scheduleSnapshotKey({ targetType, targetId, scheduleDate }) {
   return `${targetType}:${targetId}:${scheduleDate}`;
 }
 
+function normalizeLookupTitle(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function safeParseScheduleJson(raw) {
   try {
     const items = JSON.parse(raw || '[]');
@@ -1584,6 +1591,104 @@ function buildTimetableResponseFromSnapshot({ snapshotRow, sel, date, userId, wa
 }
 
 const scheduleSnapshotRefreshInFlight = new Map();
+
+function moveUserGroupSelectionId({ userId, oldGroupId, newGroupId, groupTitle }) {
+  const oldId = cleanTargetId(oldGroupId);
+  const newId = cleanTargetId(newGroupId);
+  const title = String(groupTitle || '').trim() || 'Группа';
+  const now = Date.now();
+
+  if (!oldId || !newId || oldId === newId) return;
+
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE user_selection
+      SET target_id = ?, target_title = ?, updated_at = ?
+      WHERE telegram_user_id = ? AND target_type = 'group' AND target_id = ?
+    `).run(newId, title, now, userId, oldId);
+
+    db.prepare(`
+      DELETE FROM user_selection_history
+      WHERE telegram_user_id = ? AND target_type = 'group' AND target_id = ?
+    `).run(userId, newId);
+
+    db.prepare(`
+      INSERT INTO user_selection_history (telegram_user_id, target_type, target_id, target_title, used_at)
+      VALUES (?, 'group', ?, ?, ?)
+    `).run(userId, newId, title, now);
+
+    const oldNumeric = Number(oldId);
+    const newNumeric = Number(newId);
+    if (Number.isFinite(oldNumeric) && Number.isFinite(newNumeric)) {
+      db.prepare(`
+        INSERT OR IGNORE INTO favorites (telegram_user_id, group_id, group_title, created_at)
+        SELECT telegram_user_id, ?, ?, created_at
+        FROM favorites
+        WHERE telegram_user_id = ? AND group_id = ?
+      `).run(newNumeric, title, userId, oldNumeric);
+
+      db.prepare(`
+        DELETE FROM favorites
+        WHERE telegram_user_id = ? AND group_id = ?
+      `).run(userId, oldNumeric);
+
+      const hasNewNotify = db.prepare(`
+        SELECT 1 FROM notify_settings
+        WHERE telegram_user_id = ? AND group_id = ?
+      `).get(userId, newNumeric);
+
+      if (!hasNewNotify) {
+        db.prepare(`
+          UPDATE notify_settings
+          SET group_id = ?, group_title = ?, updated_at = ?
+          WHERE telegram_user_id = ? AND group_id = ?
+        `).run(newNumeric, title, now, userId, oldNumeric);
+      } else {
+        db.prepare(`
+          DELETE FROM notify_settings
+          WHERE telegram_user_id = ? AND group_id = ?
+        `).run(userId, oldNumeric);
+      }
+    }
+  })();
+
+  console.log(`[selection] refreshed group id for user ${userId}: ${oldId} -> ${newId} (${title})`);
+}
+
+async function findReplacementGroupSchedule({ sel, scheduleDate }) {
+  if (!sel || sel.target_type !== 'group') return null;
+
+  const oldId = cleanTargetId(sel.target_id);
+  const wantedTitle = normalizeLookupTitle(sel.target_title);
+  if (!wantedTitle) return null;
+
+  const search = await runPython('search_group', [sel.target_title], { timeoutMs: 12000 });
+  const candidates = Array.isArray(search.items) ? search.items : [];
+
+  for (const candidate of candidates.slice(0, 10)) {
+    const candidateId = cleanTargetId(candidate?.id);
+    const candidateTitle = String(candidate?.title || '').trim();
+    if (!candidateId || candidateId === oldId) continue;
+    if (normalizeLookupTitle(candidateTitle) !== wantedTitle) continue;
+
+    try {
+      const py = await runPython('timetable_group', [candidateId, scheduleDate, scheduleDate], { timeoutMs: 12000 });
+      const items = Array.isArray(py.items) ? py.items : [];
+      if (items.length === 0) continue;
+
+      return {
+        targetType: 'group',
+        targetId: candidateId,
+        targetTitle: candidateTitle || sel.target_title,
+        items,
+      };
+    } catch {
+      // Пробуем следующий найденный id.
+    }
+  }
+
+  return null;
+}
 
 async function refreshScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDate, requestedAt = null }) {
   touchScheduleSnapshot({ targetType, targetId, targetTitle, scheduleDate, requestedAt });
@@ -1980,7 +2085,7 @@ app.post('/api/timetable/day', async (req, res) => {
     return res.status(401).json({ ok: false, error: String(e?.message || e) });
   }
 
-  const cacheKey = `tt_${sel.target_type}_${sel.target_id}_${String(date)}`;
+  let cacheKey = `tt_${sel.target_type}_${sel.target_id}_${String(date)}`;
   const requestedAt = Date.now();
 
   touchScheduleSnapshot({
@@ -1992,13 +2097,49 @@ app.post('/api/timetable/day', async (req, res) => {
   });
 
   try {
-    const refresh = await refreshScheduleSnapshot({
+    let refresh = await refreshScheduleSnapshot({
       targetType: sel.target_type,
       targetId: sel.target_id,
       targetTitle: sel.target_title,
       scheduleDate: String(date),
       requestedAt,
     });
+
+    if (sel.target_type === 'group' && !scheduleJsonHasItems(refresh.snapshotRow?.data_json)) {
+      const replacement = await findReplacementGroupSchedule({
+        sel,
+        scheduleDate: String(date),
+      });
+
+      if (replacement) {
+        moveUserGroupSelectionId({
+          userId,
+          oldGroupId: sel.target_id,
+          newGroupId: replacement.targetId,
+          groupTitle: replacement.targetTitle,
+        });
+
+        sel = {
+          ...sel,
+          target_id: replacement.targetId,
+          target_title: replacement.targetTitle,
+        };
+        cacheKey = `tt_${sel.target_type}_${sel.target_id}_${String(date)}`;
+
+        const recovered = applyFreshScheduleSnapshot({
+          targetType: replacement.targetType,
+          targetId: replacement.targetId,
+          targetTitle: replacement.targetTitle,
+          scheduleDate: String(date),
+          freshItems: replacement.items,
+        });
+
+        refresh = {
+          state: 'recovered_group_id',
+          snapshotRow: recovered.snapshotRow,
+        };
+      }
+    }
 
     const snapshotResponse = buildTimetableResponseFromSnapshot({
       snapshotRow: refresh.snapshotRow,
