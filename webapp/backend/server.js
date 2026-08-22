@@ -2171,9 +2171,17 @@ app.post('/api/timetable/nearest', async (req, res) => {
   const cmd = sel.target_type === 'teacher' ? 'timetable_teacher' : 'timetable_group';
 
   try {
-    let py = await runPython(cmd, [cleanTargetId(sel.target_id), startDate, endDate], { timeoutMs: 16000 });
-    let items = Array.isArray(py.items) ? py.items : [];
-    let firstDate = firstScheduleDateFromItems(items);
+    let items = [];
+    let firstDate = null;
+    let primaryError = null;
+
+    try {
+      const py = await runPython(cmd, [cleanTargetId(sel.target_id), startDate, endDate], { timeoutMs: 16000 });
+      items = Array.isArray(py.items) ? py.items : [];
+      firstDate = firstScheduleDateFromItems(items);
+    } catch (e) {
+      primaryError = e;
+    }
 
     if (!firstDate && sel.target_type === 'group') {
       const replacement = await findReplacementGroupScheduleWindow({
@@ -2201,6 +2209,10 @@ app.post('/api/timetable/nearest', async (req, res) => {
     }
 
     if (!firstDate) {
+      if (primaryError) {
+        const msg = String(primaryError?.message || primaryError);
+        return res.status(500).json({ ok: false, error: /FA_TIMEOUT/.test(msg) ? 'FA_TIMEOUT' : msg.slice(0, 300) });
+      }
       return res.json({ ok: true, found: false, date: null });
     }
 
@@ -2336,6 +2348,60 @@ app.post('/api/timetable/day', async (req, res) => {
 
   } catch (e) {
     const msg = String(e?.message || e);
+
+    if (sel.target_type === 'group') {
+      try {
+        const replacement = await findReplacementGroupSchedule({
+          sel,
+          scheduleDate: String(date),
+        });
+
+        if (replacement) {
+          migrateGroupIdForTitle({
+            oldGroupId: sel.target_id,
+            newGroupId: replacement.targetId,
+            groupTitle: replacement.targetTitle,
+            reason: `error recovery triggered by user ${userId}: ${msg.slice(0, 120)}`,
+          });
+
+          sel = {
+            ...sel,
+            target_id: replacement.targetId,
+            target_title: replacement.targetTitle,
+          };
+          cacheKey = `tt_${sel.target_type}_${sel.target_id}_${String(date)}`;
+
+          const recovered = applyFreshScheduleSnapshot({
+            targetType: replacement.targetType,
+            targetId: replacement.targetId,
+            targetTitle: replacement.targetTitle,
+            scheduleDate: String(date),
+            freshItems: replacement.items,
+          });
+
+          const recoveredResponse = buildTimetableResponseFromSnapshot({
+            snapshotRow: recovered.snapshotRow,
+            sel,
+            date,
+            userId,
+            showingSavedVersion: false,
+            warning: null,
+          });
+
+          if (recoveredResponse) {
+            cacheSet(cacheKey, {
+              ok: true,
+              count: recoveredResponse.count,
+              items: safeParseScheduleJson(recovered.snapshotRow?.data_json || '[]'),
+            });
+            return res.json(recoveredResponse);
+          }
+        }
+      } catch {
+        // Если восстановление не удалось, ниже вернем сохраненную версию или исходную ошибку.
+      }
+    }
+
     markScheduleSnapshotError({
       targetType: sel.target_type,
       targetId: sel.target_id,
